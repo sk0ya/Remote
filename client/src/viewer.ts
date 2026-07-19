@@ -30,8 +30,12 @@ export function renderViewer(app: HTMLElement, paired: Paired, onExit: () => voi
   const st = document.getElementById("vst")!;
   let pc: RTCPeerConnection | null = null;
   let keyboard: VirtualKeyboard | null = null;
+  let exited = false;
+  let retryTimer = 0;
 
   const cleanup = () => {
+    exited = true;
+    clearTimeout(retryTimer);
     pc?.close();
     pc = null;
     ch.close();
@@ -40,6 +44,15 @@ export function renderViewer(app: HTMLElement, paired: Paired, onExit: () => voi
     cleanup();
     onExit();
   });
+
+  // 切断・失敗時は少し待って自動で接続し直す
+  const scheduleRetry = (delayMs: number) => {
+    if (exited) return;
+    clearTimeout(retryTimer);
+    retryTimer = window.setTimeout(() => {
+      if (!exited) requestConnect();
+    }, delayMs);
+  };
 
   const setStatus = (text: string, error = false) => {
     st.textContent = text;
@@ -76,10 +89,12 @@ export function renderViewer(app: HTMLElement, paired: Paired, onExit: () => voi
           setStatus("P2P接続中...");
           break;
         case "failed":
-          setStatus("P2P接続失敗 (NAT越え不可の可能性)", true);
+          setStatus("P2P接続失敗 — 再接続します...", true);
+          scheduleRetry(3000);
           break;
         case "disconnected":
           setStatus("接続が不安定です...", true);
+          scheduleRetry(5000);
           break;
       }
     };
@@ -119,7 +134,13 @@ export function renderViewer(app: HTMLElement, paired: Paired, onExit: () => voi
         }
       }
     },
-    onClose: (reason) => setStatus(`シグナリング切断: ${reason}`, true),
+    onClose: (reason) => {
+      if (exited) return;
+      setStatus(`シグナリング切断: ${reason} — 再接続します...`, true);
+      window.setTimeout(() => {
+        if (!exited) ch.connect();
+      }, 3000);
+    },
   });
   ch.connect();
 }

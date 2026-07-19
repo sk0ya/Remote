@@ -24,17 +24,19 @@ type Session struct {
 	pc          *webrtc.PeerConnection
 	track       *webrtc.TrackLocalStaticSample
 	cancelMedia context.CancelFunc
-	OnInput     func(data []byte) // DataChannel "input" の受信 (task4で使用)
+	mediaOpts   hostmedia.Options
+	OnInput     func(data []byte) // DataChannel "input" の受信
 	OnClosed    func()
+	OnState     func(state string)
 }
 
 // New はPeerConnectionを作り、gathering完了済みのoffer SDPを返す。
-func New(ctx context.Context) (*Session, string, error) {
+func New(ctx context.Context, mediaOpts hostmedia.Options) (*Session, string, error) {
 	pc, err := webrtc.NewPeerConnection(webrtc.Configuration{ICEServers: iceServers})
 	if err != nil {
 		return nil, "", err
 	}
-	s := &Session{pc: pc}
+	s := &Session{pc: pc, mediaOpts: mediaOpts}
 
 	s.track, err = webrtc.NewTrackLocalStaticSample(
 		webrtc.RTPCodecCapability{
@@ -65,6 +67,9 @@ func New(ctx context.Context) (*Session, string, error) {
 
 	pc.OnConnectionStateChange(func(state webrtc.PeerConnectionState) {
 		log.Printf("session: 状態 %s", state)
+		if s.OnState != nil {
+			s.OnState(state.String())
+		}
 		switch state {
 		case webrtc.PeerConnectionStateConnected:
 			s.startMedia()
@@ -114,7 +119,7 @@ func (s *Session) startMedia() {
 	s.cancelMedia = cancel
 	ch := make(chan hostmedia.Sample, 8)
 	go func() {
-		if err := hostmedia.Capture(ctx, ch); err != nil && ctx.Err() == nil {
+		if err := hostmedia.Capture(ctx, s.mediaOpts, ch); err != nil && ctx.Err() == nil {
 			log.Printf("session: キャプチャ終了: %v", err)
 		}
 	}()

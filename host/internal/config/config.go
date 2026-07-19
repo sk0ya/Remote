@@ -16,6 +16,8 @@ type Config struct {
 	ClientURL       string `json:"clientUrl"`       // スマホ用WebアプリのURL(QRに埋め込む)
 	DeviceTokenHash string `json:"deviceTokenHash"` // 登録端末トークンのSHA-256 (base64)
 	SharedSecret    string `json:"sharedSecret"`    // SDP HMAC用共有シークレット (base64)
+	BitrateMbps     int    `json:"bitrateMbps"`     // 映像ビットレート (既定4)
+	FPS             int    `json:"fps"`             // フレームレート (既定30)
 }
 
 const defaultSignalURL = "ws://127.0.0.1:8787/ws"
@@ -73,6 +75,12 @@ func Load() (*Config, error) {
 	}
 	if c.SignalURL == "" {
 		c.SignalURL = defaultSignalURL
+	}
+	if c.BitrateMbps <= 0 {
+		c.BitrateMbps = 4
+	}
+	if c.FPS <= 0 {
+		c.FPS = 30
 	}
 	return &c, nil
 }

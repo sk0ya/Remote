@@ -16,7 +16,7 @@ func main() {
 
 	ch := make(chan media.Sample, 8)
 	done := make(chan error, 1)
-	go func() { done <- media.Capture(ctx, ch) }()
+	go func() { done <- media.Capture(ctx, media.Options{}, ch) }()
 
 	var frames, bytes int
 	start := time.Now()
