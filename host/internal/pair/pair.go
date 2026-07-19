@@ -11,11 +11,33 @@ import (
 	"crypto/subtle"
 	"encoding/base64"
 	"errors"
+	"net/netip"
 	"sync"
 	"time"
 
 	"remotehost/internal/config"
 )
+
+// sameNetwork は2つの観測グローバルIPが同一ネットワークとみなせるか判定する。
+// IPv4はNAT越しに同じ公開IPになるため完全一致。
+// IPv6は端末ごとにアドレスが異なるため/64プレフィックス一致で判定する。
+// (ローカル開発ではどちらも空文字なので一致扱い)
+func sameNetwork(a, b string) bool {
+	if a == b {
+		return true
+	}
+	ipA, errA := netip.ParseAddr(a)
+	ipB, errB := netip.ParseAddr(b)
+	if errA != nil || errB != nil {
+		return false
+	}
+	if ipA.Is6() && ipB.Is6() && !ipA.Is4In6() && !ipB.Is4In6() {
+		prefA, _ := ipA.Prefix(64)
+		prefB, _ := ipB.Prefix(64)
+		return prefA == prefB
+	}
+	return false
+}
 
 const (
 	codeTTL     = 10 * time.Minute
@@ -88,7 +110,7 @@ func (m *Manager) Handle(code, password, clientIP, hostIP string) (token, secret
 	if subtle.ConstantTimeCompare([]byte(password), []byte(m.password)) != 1 {
 		return "", "", ErrPass
 	}
-	if clientIP != hostIP {
+	if !sameNetwork(clientIP, hostIP) {
 		return "", "", ErrNetwork
 	}
 
