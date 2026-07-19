@@ -1,6 +1,8 @@
 // ビューア画面: ホストへ接続要求を送り、offer/answer交換して映像を表示する。
 
 import { SignalChannel } from "./signal";
+import { InputController } from "./input";
+import { VirtualKeyboard } from "./keyboard";
 
 const ICE_SERVERS: RTCIceServer[] = [
   { urls: "stun:stun.cloudflare.com:3478" },
@@ -9,16 +11,23 @@ const ICE_SERVERS: RTCIceServer[] = [
 
 export function renderViewer(app: HTMLElement, hostId: string, onExit: () => void): void {
   app.innerHTML = `
-    <div class="viewer">
+    <div class="viewer" id="vroot">
       <video id="screen" autoplay playsinline muted></video>
+      <div class="surface" id="surface"></div>
       <div class="hud">
         <span id="vst" class="status">接続中...</span>
-        <button class="ghost" id="exit">切断</button>
+        <span>
+          <button class="ghost" id="kbd-toggle">⌨</button>
+          <button class="ghost" id="exit">切断</button>
+        </span>
       </div>
     </div>`;
   const video = document.getElementById("screen") as HTMLVideoElement;
+  const surface = document.getElementById("surface")!;
+  const vroot = document.getElementById("vroot")!;
   const st = document.getElementById("vst")!;
   let pc: RTCPeerConnection | null = null;
+  let keyboard: VirtualKeyboard | null = null;
 
   const cleanup = () => {
     pc?.close();
@@ -42,8 +51,10 @@ export function renderViewer(app: HTMLElement, hostId: string, onExit: () => voi
       video.srcObject = ev.streams[0] ?? new MediaStream([ev.track]);
     };
     pc.ondatachannel = (ev) => {
-      // task4: 入力チャネル
-      void ev;
+      if (ev.channel.label !== "input") return;
+      const controller = new InputController(video, surface, ev.channel);
+      keyboard = new VirtualKeyboard(vroot, (msg) => controller.send(msg));
+      document.getElementById("kbd-toggle")!.addEventListener("click", () => keyboard?.toggle());
     };
     pc.onconnectionstatechange = () => {
       if (!pc) return;

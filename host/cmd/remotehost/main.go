@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"remotehost/internal/config"
+	"remotehost/internal/input"
 	"remotehost/internal/session"
 	sig "remotehost/internal/signal"
 )
@@ -67,9 +68,7 @@ func main() {
 					client.Send(map[string]any{"t": "error", "reason": "session"})
 					return
 				}
-				s.OnInput = func(data []byte) {
-					// task4: 入力注入
-				}
+				s.OnInput = input.Handle
 				s.OnClosed = func() { log.Printf("session: 終了") }
 				sess = s
 				client.Send(map[string]any{"t": "offer", "sdp": sdp})
