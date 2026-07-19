@@ -1,11 +1,22 @@
 import { loadPaired, savePaired, clearPaired, type Paired } from "./config";
-import { SignalChannel } from "./signal";
+import { renderViewer } from "./viewer";
 
 const app = document.getElementById("app")!;
 
 // ルーティング: QRから開くと #/pair?h=<hostId>&c=<code> が付く
 function route(): void {
   const hash = location.hash;
+  if (hash.startsWith("#/dev")) {
+    // 開発用: #/dev?h=<hostId> で即ビューアを開く(認証実装前の動作確認用)
+    const params = new URLSearchParams(hash.slice(hash.indexOf("?") + 1));
+    const hostId = params.get("h");
+    if (hostId) {
+      renderViewer(app, hostId, () => {
+        location.hash = "";
+      });
+      return;
+    }
+  }
   if (hash.startsWith("#/pair")) {
     const params = new URLSearchParams(hash.slice(hash.indexOf("?") + 1));
     const hostId = params.get("h");
@@ -61,13 +72,12 @@ function renderHome(paired: Paired): void {
       <div class="status" id="st"></div>
     </div>`)
   );
-  const st = document.getElementById("st")!;
   document.getElementById("unpair")!.addEventListener("click", () => {
     clearPaired();
     route();
   });
   document.getElementById("connect")!.addEventListener("click", () => {
-    connectTest(paired.hostId, st);
+    renderViewer(app, paired.hostId, route);
   });
 }
 
@@ -91,30 +101,6 @@ function renderUnpaired(): void {
     route();
     void st;
   });
-}
-
-// ---- シグナリング疎通テスト (WebRTC実装までの仮動作) ----
-function connectTest(hostId: string, st: HTMLElement): void {
-  st.classList.remove("error");
-  st.textContent = "シグナリング接続中...";
-  const ch = new SignalChannel(hostId, {
-    onOpen: (ip, peerPresent) => {
-      st.textContent = `接続OK (自分のIP: ${ip}) ホスト${peerPresent ? "在室" : "不在"} → ping送信`;
-      ch.send({ t: "ping" });
-    },
-    onMessage: (msg) => {
-      st.textContent = `ホストから応答: ${JSON.stringify(msg)}`;
-    },
-    onPeerJoined: () => {
-      st.textContent = "ホストが接続しました → ping送信";
-      ch.send({ t: "ping" });
-    },
-    onClose: (reason) => {
-      st.classList.add("error");
-      st.textContent = `切断: ${reason}`;
-    },
-  });
-  ch.connect();
 }
 
 window.addEventListener("hashchange", route);
