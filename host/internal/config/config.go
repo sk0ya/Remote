@@ -13,7 +13,7 @@ import (
 type Config struct {
 	HostID          string `json:"hostId"`
 	SignalURL       string `json:"signalUrl"`
-	Password        string `json:"password"`        // ペアリング用パスワード(平文表示が必要なため保存)
+	ClientURL       string `json:"clientUrl"`       // スマホ用WebアプリのURL(QRに埋め込む)
 	DeviceTokenHash string `json:"deviceTokenHash"` // 登録端末トークンのSHA-256 (base64)
 	SharedSecret    string `json:"sharedSecret"`    // SDP HMAC用共有シークレット (base64)
 }

@@ -3,13 +3,15 @@
 import { SignalChannel } from "./signal";
 import { InputController } from "./input";
 import { VirtualKeyboard } from "./keyboard";
+import { hmacSDP } from "./crypto";
+import type { Paired } from "./config";
 
 const ICE_SERVERS: RTCIceServer[] = [
   { urls: "stun:stun.cloudflare.com:3478" },
   { urls: "stun:stun.l.google.com:19302" },
 ];
 
-export function renderViewer(app: HTMLElement, hostId: string, onExit: () => void): void {
+export function renderViewer(app: HTMLElement, paired: Paired, onExit: () => void): void {
   app.innerHTML = `
     <div class="viewer" id="vroot">
       <video id="screen" autoplay playsinline muted></video>
@@ -44,7 +46,15 @@ export function renderViewer(app: HTMLElement, hostId: string, onExit: () => voi
     st.classList.toggle("error", error);
   };
 
-  async function handleOffer(sdp: string): Promise<void> {
+  async function handleOffer(sdp: string, mac: string | undefined): Promise<void> {
+    // HTTPS環境ではofferの改ざん(中継サーバーのなりすまし)を検証する
+    const expected = await hmacSDP(paired.secret, sdp);
+    if (expected !== null) {
+      if (mac !== expected) {
+        setStatus("接続情報の検証に失敗しました(中継サーバーが信頼できません)", true);
+        return;
+      }
+    }
     pc?.close();
     pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
     pc.ontrack = (ev) => {
@@ -76,30 +86,37 @@ export function renderViewer(app: HTMLElement, hostId: string, onExit: () => voi
     await pc.setRemoteDescription({ type: "offer", sdp });
     await pc.setLocalDescription(await pc.createAnswer());
     await waitIceComplete(pc);
-    ch.send({ t: "answer", sdp: pc.localDescription!.sdp });
+    const answerSDP = pc.localDescription!.sdp;
+    const answerMAC = await hmacSDP(paired.secret, answerSDP);
+    ch.send({ t: "answer", sdp: answerSDP, ...(answerMAC ? { mac: answerMAC } : {}) });
     setStatus("answer送信、P2P確立待ち...");
   }
 
-  const ch = new SignalChannel(hostId, {
+  const requestConnect = () => {
+    setStatus("ホストへ接続要求...");
+    ch.send({ t: "connect", token: paired.token });
+  };
+
+  const ch = new SignalChannel(paired.hostId, {
     onOpen: (_ip, peerPresent) => {
       if (peerPresent) {
-        setStatus("ホストへ接続要求...");
-        ch.send({ t: "connect" });
+        requestConnect();
       } else {
         setStatus("ホストがオフラインです。待機中...", true);
       }
     },
-    onPeerJoined: () => {
-      setStatus("ホストへ接続要求...");
-      ch.send({ t: "connect" });
-    },
+    onPeerJoined: requestConnect,
     onPeerLeft: () => setStatus("ホストが切断しました", true),
     onMessage: (msg) => {
-      const m = msg as { t: string; sdp?: string; reason?: string };
+      const m = msg as { t: string; sdp?: string; mac?: string; reason?: string };
       if (m.t === "offer" && m.sdp) {
-        handleOffer(m.sdp).catch((e) => setStatus(`offer処理失敗: ${e}`, true));
+        handleOffer(m.sdp, m.mac).catch((e) => setStatus(`offer処理失敗: ${e}`, true));
       } else if (m.t === "error") {
-        setStatus(`ホスト側エラー: ${m.reason}`, true);
+        if (m.reason === "auth") {
+          setStatus("認証に失敗しました。再ペアリングが必要です。", true);
+        } else {
+          setStatus(`ホスト側エラー: ${m.reason}`, true);
+        }
       }
     },
     onClose: (reason) => setStatus(`シグナリング切断: ${reason}`, true),
