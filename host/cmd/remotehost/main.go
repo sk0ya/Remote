@@ -156,14 +156,17 @@ func (a *app) onMessage(msg json.RawMessage, peerIP string) {
 		if a.sess == nil {
 			return
 		}
-		// HTTPS環境のクライアントはMACを付ける。付いていれば必ず検証。
-		// (開発用HTTP環境ではWebCryptoが使えないためMACなしを許容)
-		if m.MAC != "" && !a.pm.VerifyMAC(m.SDP, m.MAC) {
-			log.Printf("session: answer MAC不一致 — 破棄")
-			return
-		}
-		if m.MAC == "" {
-			log.Printf("session: answerにMACなし (開発モード想定)")
+		// 正規ペアリング済み(共有シークレットあり)なら、answerのMACは必須。
+		// MACなし/不一致のanswerは中継サーバーやなりすまし端末による
+		// セッション乗っ取りとみなして破棄する。VerifyMACはMAC空でもfalseを返す。
+		// 共有シークレット未設定の純開発モード(HTTP/WebCrypto不可)のみMACなしを許容。
+		if a.pm.HasSecret() {
+			if !a.pm.VerifyMAC(m.SDP, m.MAC) {
+				log.Printf("session: answer MAC検証失敗 — 破棄")
+				return
+			}
+		} else {
+			log.Printf("session: 共有シークレット未設定 — MAC検証なし(開発モード)")
 		}
 		if err := a.sess.HandleAnswer(m.SDP); err != nil {
 			log.Printf("session: answer適用失敗: %v", err)

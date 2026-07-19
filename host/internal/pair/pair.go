@@ -43,6 +43,7 @@ const (
 	codeTTL     = 10 * time.Minute
 	codeLen     = 6
 	passwordLen = 8
+	maxAttempts = 5 // コード/パスワード総当たり対策: 失敗がこの回数に達したらコード失効
 )
 
 var (
@@ -80,6 +81,7 @@ type Manager struct {
 	code       string
 	password   string // 表示用にペアリングセッション中のみ平文で保持
 	codeExpiry time.Time
+	attempts   int // 現コードに対する失敗回数
 }
 
 func NewManager(cfg *config.Config) *Manager {
@@ -94,6 +96,7 @@ func (m *Manager) Begin() (code, password string) {
 	m.code = randomString(codeLen)
 	m.password = randomString(passwordLen)
 	m.codeExpiry = time.Now().Add(codeTTL)
+	m.attempts = 0
 	return m.code, m.password
 }
 
@@ -103,13 +106,27 @@ func (m *Manager) Handle(code, password, clientIP, hostIP string) (token, secret
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	if m.code == "" || time.Now().After(m.codeExpiry) ||
-		subtle.ConstantTimeCompare([]byte(code), []byte(m.code)) != 1 {
+	if m.code == "" || time.Now().After(m.codeExpiry) {
 		return "", "", ErrCode
 	}
-	if subtle.ConstantTimeCompare([]byte(password), []byte(m.password)) != 1 {
+	// 総当たり対策: 失敗が上限に達したらコードを即失効させる。
+	if m.attempts >= maxAttempts {
+		m.code = ""
+		m.password = ""
+		return "", "", ErrCode
+	}
+
+	codeOK := subtle.ConstantTimeCompare([]byte(code), []byte(m.code)) == 1
+	passOK := subtle.ConstantTimeCompare([]byte(password), []byte(m.password)) == 1
+	if !codeOK {
+		m.attempts++
+		return "", "", ErrCode
+	}
+	if !passOK {
+		m.attempts++
 		return "", "", ErrPass
 	}
+	// コード/パスワードは正しい。ネットワーク不一致は推測不能なので試行回数に数えない。
 	if !sameNetwork(clientIP, hostIP) {
 		return "", "", ErrNetwork
 	}
@@ -117,6 +134,7 @@ func (m *Manager) Handle(code, password, clientIP, hostIP string) (token, secret
 	// コードは使い捨て
 	m.code = ""
 	m.password = ""
+	m.attempts = 0
 
 	tokenBytes := randomBytes(32)
 	secretBytes := randomBytes(32)
@@ -165,6 +183,14 @@ func (m *Manager) Paired() bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.cfg.DeviceTokenHash != ""
+}
+
+// HasSecret はSDP検証用の共有シークレットを保持しているか。
+// 正規ペアリング済みならtrueで、この場合SDP MACは必須となる。
+func (m *Manager) HasSecret() bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.cfg.SharedSecret != ""
 }
 
 // MAC はSDPのHMAC-SHA256(hex)を計算する。シークレット未設定なら空文字。

@@ -1,6 +1,11 @@
 package pair
 
-import "testing"
+import (
+	"errors"
+	"testing"
+
+	"remotehost/internal/config"
+)
 
 func TestSameNetwork(t *testing.T) {
 	cases := []struct {
@@ -20,5 +25,48 @@ func TestSameNetwork(t *testing.T) {
 		if got := sameNetwork(c.a, c.b); got != c.want {
 			t.Errorf("sameNetwork(%q, %q) = %v, want %v", c.a, c.b, got, c.want)
 		}
+	}
+}
+
+// TestHandleAttemptLimit は誤コードをmaxAttempts回試すとコードが失効し、
+// その後は正しいコードでも通らないことを確認する(総当たり対策)。
+func TestHandleAttemptLimit(t *testing.T) {
+	m := NewManager(&config.Config{})
+	code, password := m.Begin()
+
+	for i := 0; i < maxAttempts; i++ {
+		if _, _, err := m.Handle("WRONG!", password, "", ""); !errors.Is(err, ErrCode) {
+			t.Fatalf("試行%d: err = %v, want ErrCode", i, err)
+		}
+	}
+	// 上限到達後は正しいコード/パスワードでもコード失効で拒否される。
+	if _, _, err := m.Handle(code, password, "", ""); !errors.Is(err, ErrCode) {
+		t.Fatalf("上限超過後: err = %v, want ErrCode(失効)", err)
+	}
+}
+
+// TestHandleWrongPasswordCounts はパスワード誤りも試行回数に数えられることを確認する。
+func TestHandleWrongPasswordCounts(t *testing.T) {
+	m := NewManager(&config.Config{})
+	code, _ := m.Begin()
+
+	for i := 0; i < maxAttempts; i++ {
+		if _, _, err := m.Handle(code, "badpass!", "", ""); !errors.Is(err, ErrPass) {
+			t.Fatalf("試行%d: err = %v, want ErrPass", i, err)
+		}
+	}
+	if _, _, err := m.Handle(code, "badpass!", "", ""); !errors.Is(err, ErrCode) {
+		t.Fatalf("上限超過後: err = %v, want ErrCode(失効)", err)
+	}
+}
+
+func TestHasSecret(t *testing.T) {
+	m := NewManager(&config.Config{})
+	if m.HasSecret() {
+		t.Fatal("新規Managerで HasSecret() = true, want false")
+	}
+	m.cfg.SharedSecret = "abc"
+	if !m.HasSecret() {
+		t.Fatal("シークレット設定後 HasSecret() = false, want true")
 	}
 }
