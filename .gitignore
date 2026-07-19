@@ -1,0 +1,6 @@
+node_modules/
+dist/
+.wrangler/
+*.exe
+host/remotehost
+.dev.vars
