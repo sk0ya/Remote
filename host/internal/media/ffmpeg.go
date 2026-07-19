@@ -19,6 +19,9 @@ import (
 type Options struct {
 	FPS         int
 	BitrateMbps int
+	Display     int // キャプチャ対象モニタ (ddagrab output_idx)
+	// gdigrabフォールバック用の対象モニタ領域(仮想デスクトップ座標)。W==0なら全体。
+	X, Y, W, H int
 }
 
 func (o Options) normalize() Options {
@@ -36,15 +39,24 @@ func (o Options) normalize() Options {
 // NVENC/AMF は d3d11 フレームを直接受け取れる。QSV/libx264 はhwdownloadが必要。
 func pipelines(o Options) [][]string {
 	grab := func(post string) string {
-		return fmt.Sprintf("ddagrab=framerate=%d%s", o.FPS, post)
+		return fmt.Sprintf("ddagrab=output_idx=%d:framerate=%d%s", o.Display, o.FPS, post)
 	}
+	// Desktop Duplication が使えない環境向けの最終フォールバック。
+	// gdigrabにはモニタ指定がないため、対象モニタの領域を矩形指定で切り出す。
+	gdi := []string{"-f", "gdigrab", "-framerate", fmt.Sprint(o.FPS)}
+	if o.W > 0 {
+		gdi = append(gdi,
+			"-offset_x", fmt.Sprint(o.X), "-offset_y", fmt.Sprint(o.Y),
+			"-video_size", fmt.Sprintf("%dx%d", o.W, o.H),
+		)
+	}
+	gdi = append(gdi, "-i", "desktop", "-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency", "-profile:v", "baseline", "-pix_fmt", "yuv420p")
 	return [][]string{
 		{"-filter_complex", grab(""), "-c:v", "h264_nvenc", "-preset", "p1", "-tune", "ull", "-zerolatency", "1"},
 		{"-filter_complex", grab(""), "-c:v", "h264_amf", "-usage", "ultralowlatency"},
 		{"-filter_complex", grab(",hwdownload,format=bgra"), "-c:v", "h264_qsv", "-preset", "veryfast"},
 		{"-filter_complex", grab(",hwdownload,format=bgra"), "-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency", "-profile:v", "baseline", "-pix_fmt", "yuv420p"},
-		// Desktop Duplication が使えない環境向けの最終フォールバック
-		{"-f", "gdigrab", "-framerate", fmt.Sprint(o.FPS), "-i", "desktop", "-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency", "-profile:v", "baseline", "-pix_fmt", "yuv420p"},
+		gdi,
 	}
 }
 

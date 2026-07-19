@@ -6,14 +6,16 @@ package input
 import (
 	"encoding/json"
 	"log"
+	"sync"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
 )
 
 var (
-	user32       = windows.NewLazySystemDLL("user32.dll")
-	procSendInput = user32.NewProc("SendInput")
+	user32               = windows.NewLazySystemDLL("user32.dll")
+	procSendInput        = user32.NewProc("SendInput")
+	procGetSystemMetrics = user32.NewProc("GetSystemMetrics")
 )
 
 const (
@@ -29,7 +31,13 @@ const (
 	mouseeventfMiddleUp   = 0x0040
 	mouseeventfWheel      = 0x0800
 	mouseeventfHWheel     = 0x1000
+	mouseeventfVirtualdesk = 0x4000
 	mouseeventfAbsolute   = 0x8000
+
+	smXVirtualScreen  = 76
+	smYVirtualScreen  = 77
+	smCxVirtualScreen = 78
+	smCyVirtualScreen = 79
 
 	keyeventfExtendedkey = 0x0001
 	keyeventfKeyup       = 0x0002
@@ -85,6 +93,55 @@ type Msg struct {
 	S    string  `json:"s,omitempty"`    // txt: 入力テキスト
 }
 
+// 正規化座標のマップ先モニタ領域(仮想デスクトップ座標)。未設定ならプライマリ全面。
+var (
+	targetMu  sync.Mutex
+	hasTarget bool
+	tgX, tgY  int
+	tgW, tgH  int
+)
+
+// SetTarget はマウス座標のマップ先をモニタ領域(仮想デスクトップ座標)に設定する。
+func SetTarget(x, y, w, h int) {
+	targetMu.Lock()
+	defer targetMu.Unlock()
+	hasTarget = w > 0 && h > 0
+	tgX, tgY, tgW, tgH = x, y, w, h
+}
+
+// ResetTarget はマップ先を従来どおりプライマリモニタ全面に戻す。
+func ResetTarget() {
+	targetMu.Lock()
+	defer targetMu.Unlock()
+	hasTarget = false
+}
+
+func metric(index uintptr) float64 {
+	r, _, _ := procGetSystemMetrics.Call(index)
+	return float64(int32(r))
+}
+
+// mapNorm は正規化座標(0..1)を SendInput 用の絶対座標(0..65535)とフラグに変換する。
+// 対象モニタが設定されていれば仮想デスクトップ全体基準(VIRTUALDESK)でそのモニタ内へ、
+// 未設定ならプライマリモニタ基準で変換する。
+func mapNorm(x, y float64) (dx, dy int32, flags uint32) {
+	targetMu.Lock()
+	defer targetMu.Unlock()
+	if !hasTarget {
+		return int32(x * 65535), int32(y * 65535), mouseeventfAbsolute
+	}
+	vx, vy := metric(smXVirtualScreen), metric(smYVirtualScreen)
+	vw, vh := metric(smCxVirtualScreen), metric(smCyVirtualScreen)
+	if vw <= 0 || vh <= 0 {
+		return int32(x * 65535), int32(y * 65535), mouseeventfAbsolute
+	}
+	px := float64(tgX) + x*float64(tgW)
+	py := float64(tgY) + y*float64(tgH)
+	dx = int32((px - vx) / vw * 65535)
+	dy = int32((py - vy) / vh * 65535)
+	return dx, dy, mouseeventfAbsolute | mouseeventfVirtualdesk
+}
+
 // Handle は1メッセージを処理する。
 func Handle(data []byte) {
 	var m Msg
@@ -93,10 +150,11 @@ func Handle(data []byte) {
 	}
 	switch m.T {
 	case "mv":
+		dx, dy, flags := mapNorm(clamp01(m.X), clamp01(m.Y))
 		sendMouse(mouseInput{
-			dx:      int32(clamp01(m.X) * 65535),
-			dy:      int32(clamp01(m.Y) * 65535),
-			dwFlags: mouseeventfMove | mouseeventfAbsolute,
+			dx:      dx,
+			dy:      dy,
+			dwFlags: mouseeventfMove | flags,
 		})
 	case "dn", "up":
 		var flag uint32

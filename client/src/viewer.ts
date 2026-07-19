@@ -19,6 +19,7 @@ export function renderViewer(app: HTMLElement, paired: Paired, onExit: () => voi
       <div class="hud">
         <span id="vst" class="status">接続中...</span>
         <span>
+          <button class="ghost" id="disp-toggle" style="display:none"></button>
           <button class="ghost" id="kbd-toggle">⌨</button>
           <button class="ghost" id="exit">切断</button>
         </span>
@@ -28,10 +29,19 @@ export function renderViewer(app: HTMLElement, paired: Paired, onExit: () => voi
   const surface = document.getElementById("surface")!;
   const vroot = document.getElementById("vroot")!;
   const st = document.getElementById("vst")!;
+  const dispBtn = document.getElementById("disp-toggle") as HTMLButtonElement;
   let pc: RTCPeerConnection | null = null;
   let keyboard: VirtualKeyboard | null = null;
   let exited = false;
   let retryTimer = 0;
+  // ホストのディスプレイ数と表示中index (ホストからの "displays" 通知で更新)
+  let dispCount = 1;
+  let dispCur = 0;
+
+  const updateDispBtn = () => {
+    dispBtn.style.display = dispCount > 1 ? "" : "none";
+    dispBtn.textContent = `🖥 ${dispCur + 1}/${dispCount}`;
+  };
 
   const cleanup = () => {
     exited = true;
@@ -78,6 +88,23 @@ export function renderViewer(app: HTMLElement, paired: Paired, onExit: () => voi
       const controller = new InputController(video, surface, ev.channel);
       keyboard = new VirtualKeyboard(vroot, (msg) => controller.send(msg));
       document.getElementById("kbd-toggle")!.addEventListener("click", () => keyboard?.toggle());
+      // ホスト→クライアント通知 (ディスプレイ情報など)
+      ev.channel.onmessage = (me) => {
+        try {
+          const m = JSON.parse(String(me.data)) as { t: string; n?: number; cur?: number };
+          if (m.t === "displays") {
+            dispCount = m.n ?? 1;
+            dispCur = m.cur ?? 0;
+            updateDispBtn();
+          }
+        } catch {
+          // JSON以外は無視
+        }
+      };
+      // 切替ボタン: 次のディスプレイへ巡回 (onclick代入で再接続時の重複登録を防ぐ)
+      dispBtn.onclick = () => {
+        if (dispCount > 1) controller.send({ t: "disp", n: (dispCur + 1) % dispCount });
+      };
     };
     pc.onconnectionstatechange = () => {
       if (!pc) return;

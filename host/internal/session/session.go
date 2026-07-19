@@ -5,8 +5,10 @@ package session
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
+	"sync"
 	"time"
 
 	"github.com/pion/webrtc/v4"
@@ -23,9 +25,12 @@ var iceServers = []webrtc.ICEServer{
 type Session struct {
 	pc          *webrtc.PeerConnection
 	track       *webrtc.TrackLocalStaticSample
+	dc          *webrtc.DataChannel
+	mediaMu     sync.Mutex
 	cancelMedia context.CancelFunc
 	mediaOpts   hostmedia.Options
 	OnInput     func(data []byte) // DataChannel "input" の受信
+	OnDCOpen    func()            // DataChannelが開いた(ホスト→クライアント送信可能)
 	OnClosed    func()
 	OnState     func(state string)
 }
@@ -59,6 +64,12 @@ func New(ctx context.Context, mediaOpts hostmedia.Options) (*Session, string, er
 		pc.Close()
 		return nil, "", err
 	}
+	s.dc = dc
+	dc.OnOpen(func() {
+		if s.OnDCOpen != nil {
+			s.OnDCOpen()
+		}
+	})
 	dc.OnMessage(func(msg webrtc.DataChannelMessage) {
 		if s.OnInput != nil {
 			s.OnInput(msg.Data)
@@ -112,14 +123,18 @@ func (s *Session) HandleAnswer(sdp string) error {
 }
 
 func (s *Session) startMedia() {
+	s.mediaMu.Lock()
 	if s.cancelMedia != nil {
+		s.mediaMu.Unlock()
 		return
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	s.cancelMedia = cancel
+	opts := s.mediaOpts
+	s.mediaMu.Unlock()
 	ch := make(chan hostmedia.Sample, 8)
 	go func() {
-		if err := hostmedia.Capture(ctx, s.mediaOpts, ch); err != nil && ctx.Err() == nil {
+		if err := hostmedia.Capture(ctx, opts, ch); err != nil && ctx.Err() == nil {
 			log.Printf("session: キャプチャ終了: %v", err)
 		}
 	}()
@@ -142,14 +157,35 @@ func (s *Session) startMedia() {
 }
 
 func (s *Session) stopMedia() {
+	s.mediaMu.Lock()
+	defer s.mediaMu.Unlock()
 	if s.cancelMedia != nil {
 		s.cancelMedia()
 		s.cancelMedia = nil
 	}
 }
 
-func (s *Session) Send(data []byte) error {
-	return nil // 予約: ホスト→クライアントのDataChannel送信(必要時に実装)
+// SetMediaOptions はキャプチャ設定を差し替え、配信中ならキャプチャを再起動する。
+// (ディスプレイ切り替え用。エンコーダ再起動でSPS/PPSが再送されるため
+// クライアント側デコーダは解像度変更込みで追従できる)
+func (s *Session) SetMediaOptions(opts hostmedia.Options) {
+	s.mediaMu.Lock()
+	s.mediaOpts = opts
+	running := s.cancelMedia != nil
+	s.mediaMu.Unlock()
+	if running {
+		s.stopMedia()
+		s.startMedia()
+	}
+}
+
+// Send はJSONにしてDataChannel "input" でクライアントへ送る。
+func (s *Session) Send(v any) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+	return s.dc.SendText(string(b))
 }
 
 func (s *Session) Close() {

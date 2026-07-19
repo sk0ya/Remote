@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"remotehost/internal/config"
+	"remotehost/internal/display"
 	"remotehost/internal/input"
 	"remotehost/internal/media"
 	"remotehost/internal/pair"
@@ -32,6 +33,7 @@ type app struct {
 	client    *sig.Client
 	sess      *session.Session
 	hostIP    string
+	display   int // 表示中のモニタindex (-1=未選択→プライマリ)
 	setStatus func(string)
 }
 
@@ -51,7 +53,7 @@ func main() {
 	log.Printf("ペアリングページ: %s", pairURL)
 
 	ctx, cancel := context.WithCancel(context.Background())
-	a := &app{ctx: ctx, cfg: cfg, pm: pm, setStatus: func(string) {}}
+	a := &app{ctx: ctx, cfg: cfg, pm: pm, display: -1, setStatus: func(string) {}}
 
 	ui.RunTray(pm, ui.TrayCallbacks{PairPageURL: pairURL, OnQuit: cancel},
 		func(setStatus func(string)) {
@@ -131,14 +133,18 @@ func (a *app) onMessage(msg json.RawMessage, peerIP string) {
 			return
 		}
 		a.closeSession()
-		opts := media.Options{FPS: a.cfg.FPS, BitrateMbps: a.cfg.BitrateMbps}
-		s, sdp, err := session.New(a.ctx, opts)
+		mons := display.List()
+		if a.display < 0 || a.display >= len(mons) {
+			a.display = display.PrimaryIndex(mons)
+		}
+		s, sdp, err := session.New(a.ctx, a.mediaOptions(mons))
 		if err != nil {
 			log.Printf("session: 作成失敗: %v", err)
 			a.client.Send(map[string]any{"t": "error", "reason": "session"})
 			return
 		}
-		s.OnInput = input.Handle
+		s.OnInput = a.onInput
+		s.OnDCOpen = a.sendDisplays
 		s.OnClosed = func() {
 			log.Printf("session: 終了")
 			a.setStatus(statusIdle(a.pm))
@@ -174,4 +180,58 @@ func (a *app) onMessage(msg json.RawMessage, peerIP string) {
 		}
 		log.Printf("session: answer適用")
 	}
+}
+
+// mediaOptions は選択中モニタに合わせたキャプチャ設定を作り、
+// マウス座標のマップ先も同じモニタに合わせる。
+func (a *app) mediaOptions(mons []display.Monitor) media.Options {
+	opts := media.Options{FPS: a.cfg.FPS, BitrateMbps: a.cfg.BitrateMbps}
+	if a.display >= 0 && a.display < len(mons) {
+		mon := mons[a.display]
+		opts.Display = a.display
+		opts.X, opts.Y, opts.W, opts.H = mon.X, mon.Y, mon.W, mon.H
+		input.SetTarget(mon.X, mon.Y, mon.W, mon.H)
+	} else {
+		input.ResetTarget()
+	}
+	return opts
+}
+
+// onInput はDataChannelメッセージを振り分ける。ディスプレイ切替だけここで拾い、
+// 残りは入力注入へ渡す。
+func (a *app) onInput(data []byte) {
+	var m struct {
+		T string `json:"t"`
+		N int    `json:"n"`
+	}
+	if err := json.Unmarshal(data, &m); err == nil && m.T == "disp" {
+		a.switchDisplay(m.N)
+		return
+	}
+	input.Handle(data)
+}
+
+func (a *app) sendDisplays() {
+	if a.sess == nil {
+		return
+	}
+	mons := display.List()
+	n := len(mons)
+	if n == 0 {
+		n = 1
+	}
+	if err := a.sess.Send(map[string]any{"t": "displays", "n": n, "cur": a.display}); err != nil {
+		log.Printf("session: displays送信失敗: %v", err)
+	}
+}
+
+func (a *app) switchDisplay(n int) {
+	mons := display.List()
+	if a.sess == nil || n < 0 || n >= len(mons) || n == a.display {
+		return
+	}
+	a.display = n
+	log.Printf("session: ディスプレイ切替 → %d (%s)", n, mons[n].Device)
+	a.sess.SetMediaOptions(a.mediaOptions(mons))
+	a.sendDisplays()
 }
