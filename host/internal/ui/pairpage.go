@@ -32,9 +32,10 @@ p { color:#9aa0ae; max-width: 480px; text-align:center; line-height:1.7; }
 <div>パスワード</div>
 <div class="pw">{{.Password}}</div>
 <p>スマホのカメラでQRコードを読み取り、開いたページに上のパスワードを入力してください。<br>
+続けてパスキーの作成を求められるので、顔認証・指紋などで承認してください。<br>
 スマホはこのPCと同じWi-Fiに接続しておく必要があります。<br>
 コードの有効期限は10分です(このページを再読み込みすると新しいコードになります)。</p>
-{{if .Paired}}<p class="warn">既に登録済みの端末があります。新しくペアリングすると古い端末は使えなくなります。</p>{{end}}
+{{if .Paired}}<p class="warn">既に登録済みのパスキーがあります。新しくペアリングすると古いパスキーでは接続できなくなります。</p>{{end}}
 <p class="url">QRが読めない場合はスマホで直接開く: <span id="pair-url">{{.PairURL}}</span></p>
 </body></html>`))
 

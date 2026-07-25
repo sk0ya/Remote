@@ -6,23 +6,51 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 
 	"remotehost/internal/voice"
 )
 
 type Config struct {
-	HostID          string          `json:"hostId"`
-	SignalURL       string          `json:"signalUrl"`
-	ClientURL       string          `json:"clientUrl"`       // スマホ用WebアプリのURL(QRに埋め込む)
-	DeviceTokenHash string          `json:"deviceTokenHash"` // 登録端末トークンのSHA-256 (base64)
-	SharedSecret    string          `json:"sharedSecret"`    // SDP HMAC用共有シークレット (base64)
-	BitrateMbps     int             `json:"bitrateMbps"`     // 映像ビットレート (既定4)
-	FPS             int             `json:"fps"`             // フレームレート (既定30)
-	VoiceCommands   []voice.Command `json:"voiceCommands"`   // 音声コマンド定義 (未指定ならvoice.Defaults())
-	STTCommand      string          `json:"sttCommand"`      // 音声認識エンジン(jvi-serve)の実行ファイル
-	STTDir          string          `json:"sttDir"`          // その作業ディレクトリ (config.tomlとmodels/がある場所)
+	HostID    string `json:"hostId"`
+	SignalURL string `json:"signalUrl"`
+	ClientURL string `json:"clientUrl"` // スマホ用WebアプリのURL(QRに埋め込む)
+	// 登録パスキーの資格情報ID と 公開鍵(SPKI DER)。どちらもbase64url。
+	// 秘密情報ではないので、漏れても他端末が接続できるようにはならない。
+	CredentialID  string          `json:"credentialId"`
+	CredentialKey string          `json:"credentialKey"`
+	ClientOrigins []string        `json:"clientOrigins"` // WebAuthnで受け付けるクライアントのオリジン
+	BitrateMbps   int             `json:"bitrateMbps"`   // 映像ビットレート (既定4)
+	FPS           int             `json:"fps"`           // フレームレート (既定30)
+	VoiceCommands []voice.Command `json:"voiceCommands"` // 音声コマンド定義 (未指定ならvoice.Defaults())
+	STTCommand    string          `json:"sttCommand"`    // 音声認識エンジン(jvi-serve)の実行ファイル
+	STTDir        string          `json:"sttDir"`        // その作業ディレクトリ (config.tomlとmodels/がある場所)
+}
+
+// defaultClientOrigins はパスキーの検証で許可するオリジンの既定値。
+// WebAuthnはセキュアコンテキストでしか動かないため、httpは localhost のみ有効
+// (LAN IPのvite devサーバーからはパスキーを作れない)。
+func defaultClientOrigins(clientURL string) []string {
+	origins := []string{"https://remote-client.pages.dev", "http://localhost:5175"}
+	if o := originOf(clientURL); o != "" && !slices.Contains(origins, o) {
+		origins = append(origins, o)
+	}
+	return origins
+}
+
+// originOf はURLから scheme://host[:port] を取り出す。解析できなければ空文字。
+func originOf(rawURL string) string {
+	if rawURL == "" {
+		return ""
+	}
+	u, err := url.Parse(rawURL)
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return ""
+	}
+	return u.Scheme + "://" + u.Host
 }
 
 // defaultSTT は同梱の音声認識エンジン (stt/) の場所を、実行ファイルの位置から求める。
@@ -74,6 +102,7 @@ func Load() (*Config, error) {
 		c := &Config{
 			HostID:        randomID(16),
 			SignalURL:     defaultSignalURL,
+			ClientOrigins: defaultClientOrigins(""),
 			VoiceCommands: voice.Defaults(),
 			STTCommand:    sttCmd,
 			STTDir:        sttDir,
@@ -105,6 +134,15 @@ func Load() (*Config, error) {
 	// キー自体が無いときだけ既定値を書き戻す
 	// (voiceCommandsの空配列 [] は「音声コマンド無効」の意思表示なので上書きしない)。
 	filled := false
+	if len(c.ClientOrigins) == 0 {
+		c.ClientOrigins = defaultClientOrigins(c.ClientURL)
+		filled = true
+	} else if o := originOf(c.ClientURL); o != "" && !slices.Contains(c.ClientOrigins, o) {
+		// clientUrl を後から書き換えた場合の追従。ここを拾わないと、
+		// ペアリングは通るのに接続時のオリジン検証だけが落ちて原因が分かりにくい。
+		c.ClientOrigins = append(c.ClientOrigins, o)
+		filled = true
+	}
 	if c.VoiceCommands == nil {
 		c.VoiceCommands = voice.Defaults()
 		filled = true

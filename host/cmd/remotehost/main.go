@@ -2,8 +2,10 @@ package main
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
 	"strings"
 	"sync"
@@ -24,10 +26,16 @@ import (
 type clientMsg struct {
 	T        string `json:"t"`
 	SDP      string `json:"sdp,omitempty"`
-	MAC      string `json:"mac,omitempty"`
 	Code     string `json:"code,omitempty"`
 	Password string `json:"password,omitempty"`
-	Token    string `json:"token,omitempty"`
+	// パスキー登録 (pair-key)。Reg は pair-ok で渡した合言葉の返送。
+	Reg    string `json:"reg,omitempty"`
+	CredID string `json:"credId,omitempty"`
+	PubKey string `json:"pubKey,omitempty"`
+	// 接続時のWebAuthn assertion (answer)。いずれもbase64url。
+	ClientData string `json:"clientData,omitempty"`
+	AuthData   string `json:"authData,omitempty"`
+	Sig        string `json:"sig,omitempty"`
 }
 
 type app struct {
@@ -35,11 +43,17 @@ type app struct {
 	cfg       *config.Config
 	pm        *pair.Manager
 	client    *sig.Client
-	sess      *session.Session
 	stt       *stt.Engine
 	hostIP    string
 	display   int // 表示中のモニタindex (-1=未選択→プライマリ)
 	setStatus func(string)
+
+	// sessMu は現行セッションと認証待ちセッションの両方を守る。
+	// タイムアウトは別ゴルーチンから触るので、ここは必ずロック越しに扱う。
+	sessMu  sync.Mutex
+	sess    *session.Session // 認証済みの現行セッション
+	pending *pendingAuth     // offer送信済み・assertion付きanswer待ち
+	authGen uint64           // 仮セッションの世代カウンタ
 
 	// クライアントから分割送信される音声の組み立て中バッファ
 	audioMu   sync.Mutex
@@ -47,8 +61,26 @@ type app struct {
 	audioWant int
 }
 
+// pendingAuth は認証が済むまでの仮のセッション。
+// 認証を通るまで現行セッションには昇格させないので、hostIdを知るだけの第三者が
+// connectを撃っても、操作中のセッションは切れない。
+type pendingAuth struct {
+	sess  *session.Session
+	nonce []byte
+	offer string
+	gen   uint64 // 世代番号。タイムアウトが古い世代を巻き添えにしないための目印
+	timer *time.Timer
+}
+
 // 1発話あたりの音声データの上限 (opusなら数十KB程度。桁違いのものは捨てる)
 const maxAudioBytes = 4 << 20
+
+// offerを送ってから認証付きanswerが返ってくるまでの猶予。
+// クライアント側はICE収集(最大5秒)のあとに生体認証ダイアログ(最大60秒)を挟むので、
+// その合計より確実に長く取る。短いとホストだけが先に諦めて無反応に見える。
+// 超えたら仮セッションを畳む(放置された場合や、hostIDを知る第三者の空打ち対策)。
+// なお映像のキャプチャはP2P確立後にしか始まらないため、認証前に掴む資源はPeerConnectionだけ。
+const authTimeout = 120 * time.Second
 
 func main() {
 	cfg, err := config.Load()
@@ -91,11 +123,94 @@ func main() {
 	a.stt.Close()
 }
 
+// session は現行セッションを返す。無ければnil。
+func (a *app) session() *session.Session {
+	a.sessMu.Lock()
+	defer a.sessMu.Unlock()
+	return a.sess
+}
+
+// closeSession は現行セッションと認証待ちの仮セッションをまとめて畳む。
 func (a *app) closeSession() {
-	if a.sess != nil {
-		a.sess.Close()
-		a.sess = nil
+	a.sessMu.Lock()
+	sess, pending := a.sess, a.pending
+	a.sess, a.pending = nil, nil
+	if pending != nil && pending.timer != nil {
+		pending.timer.Stop()
 	}
+	a.sessMu.Unlock()
+
+	if sess != nil {
+		sess.Close()
+	}
+	if pending != nil {
+		pending.sess.Close()
+	}
+}
+
+// beginAuth はofferを送る直前に呼び、仮セッションを認証待ちとして登録する。
+// 先にぶら下がっていた仮セッションがあれば畳む(現行セッションには手を出さない)。
+func (a *app) beginAuth(s *session.Session, nonce []byte, offerSDP string) {
+	a.sessMu.Lock()
+	old := a.pending
+	if old != nil && old.timer != nil {
+		old.timer.Stop()
+	}
+	a.authGen++
+	gen := a.authGen
+	p := &pendingAuth{sess: s, nonce: nonce, offer: offerSDP, gen: gen}
+	// 世代を照合してから畳むので、入れ替わった後に古いタイマーが発火しても実害はない。
+	p.timer = time.AfterFunc(authTimeout, func() { a.expireAuth(gen) })
+	a.pending = p
+	a.sessMu.Unlock()
+
+	if old != nil {
+		old.sess.Close()
+	}
+}
+
+// takeAuth は認証待ちの仮セッションを取り出す。取り出せるのは一度だけ。
+func (a *app) takeAuth() *pendingAuth {
+	a.sessMu.Lock()
+	defer a.sessMu.Unlock()
+	p := a.pending
+	if p == nil {
+		return nil
+	}
+	if p.timer != nil {
+		p.timer.Stop()
+	}
+	a.pending = nil
+	return p
+}
+
+// promote は認証を通った仮セッションを現行セッションに昇格させ、古い方を畳む。
+func (a *app) promote(s *session.Session) {
+	a.sessMu.Lock()
+	old := a.sess
+	a.sess = s
+	a.sessMu.Unlock()
+	if old != nil {
+		old.Close()
+	}
+}
+
+// expireAuth は認証待ちのまま猶予を過ぎた仮セッションを畳む。
+// 世代が変わっていれば(=既に認証済み、または新しい要求で入れ替わっていれば)何もしない。
+func (a *app) expireAuth(gen uint64) {
+	a.sessMu.Lock()
+	p := a.pending
+	if p == nil || p.gen != gen {
+		a.sessMu.Unlock()
+		return
+	}
+	a.pending = nil
+	a.sessMu.Unlock()
+
+	log.Printf("session: 認証待ちタイムアウト — 仮セッション破棄")
+	p.sess.Close()
+	a.client.Send(map[string]any{"t": "error", "reason": "timeout"})
+	a.setStatus(statusIdle(a.pm))
 }
 
 func (a *app) runSignal() {
@@ -129,7 +244,8 @@ func (a *app) onMessage(msg json.RawMessage, peerIP string) {
 		a.client.Send(map[string]any{"t": "pong", "time": time.Now().Format(time.RFC3339)})
 
 	case "pair":
-		token, secret, err := a.pm.Handle(m.Code, m.Password, peerIP, a.hostIP)
+		// コード/パスワード/ネットワークの検証まで。実際の登録はこの後の pair-key。
+		regToken, err := a.pm.Handle(m.Code, m.Password, peerIP, a.hostIP)
 		if err != nil {
 			reason := "unknown"
 			switch {
@@ -144,17 +260,34 @@ func (a *app) onMessage(msg json.RawMessage, peerIP string) {
 			a.client.Send(map[string]any{"t": "pair-err", "reason": reason})
 			return
 		}
-		log.Printf("pair: 端末登録完了 (旧端末は失効)")
-		a.setStatus(statusIdle(a.pm))
-		a.client.Send(map[string]any{"t": "pair-ok", "token": token, "secret": secret})
+		log.Printf("pair: 検証OK — パスキー登録待ち")
+		a.client.Send(map[string]any{"t": "pair-ok", "reg": regToken})
 
-	case "connect":
-		if !a.pm.VerifyToken(m.Token) {
-			log.Printf("session: 認証失敗")
-			a.client.Send(map[string]any{"t": "error", "reason": "auth"})
+	case "pair-key":
+		if err := a.pm.Register(m.CredID, m.PubKey, m.Reg); err != nil {
+			reason := "unknown"
+			switch {
+			case errors.Is(err, pair.ErrRegister):
+				reason = "code" // 猶予切れ。QRからやり直してもらう
+			case errors.Is(err, pair.ErrKey):
+				reason = "key"
+			}
+			log.Printf("pair: パスキー登録失敗 (%s): %v", reason, err)
+			a.client.Send(map[string]any{"t": "pair-err", "reason": reason})
 			return
 		}
-		a.closeSession()
+		log.Printf("pair: パスキー登録完了 (旧端末は失効)")
+		a.setStatus(statusIdle(a.pm))
+		a.client.Send(map[string]any{"t": "pair-done"})
+
+	case "connect":
+		if !a.pm.Paired() {
+			log.Printf("session: 端末未登録のまま接続要求")
+			a.client.Send(map[string]any{"t": "error", "reason": "unpaired"})
+			return
+		}
+		// 認証が通るまで現行セッションは畳まない。
+		// hostIdを知るだけの第三者がconnectを撃っても、操作中の接続は切れない。
 		mons := display.List()
 		if a.display < 0 || a.display >= len(mons) {
 			a.display = display.PrimaryIndex(mons)
@@ -180,32 +313,60 @@ func (a *app) onMessage(msg json.RawMessage, peerIP string) {
 				a.setStatus("接続中 (リモート操作中)")
 			}
 		}
-		a.sess = s
-		a.client.Send(map[string]any{"t": "offer", "sdp": sdp, "mac": a.pm.MAC(sdp)})
-		log.Printf("session: offer送信")
+		// nonceはこの接続限り。クライアントはこれとoffer/answerからチャレンジを作り、
+		// パスキーで署名して返す。認証はanswerを受け取った時点で行う。
+		nonce := pair.Nonce()
+		a.beginAuth(s, nonce, sdp)
+		a.client.Send(map[string]any{
+			"t": "offer", "sdp": sdp,
+			"nonce": base64.RawURLEncoding.EncodeToString(nonce),
+		})
+		log.Printf("session: offer送信 (認証待ち)")
 
 	case "answer":
-		if a.sess == nil {
+		p := a.takeAuth()
+		if p == nil {
+			log.Printf("session: 認証待ちでないanswer — 破棄")
 			return
 		}
-		// 正規ペアリング済み(共有シークレットあり)なら、answerのMACは必須。
-		// MACなし/不一致のanswerは中継サーバーやなりすまし端末による
-		// セッション乗っ取りとみなして破棄する。VerifyMACはMAC空でもfalseを返す。
-		// 共有シークレット未設定の純開発モード(HTTP/WebCrypto不可)のみMACなしを許容。
-		if a.pm.HasSecret() {
-			if !a.pm.VerifyMAC(m.SDP, m.MAC) {
-				log.Printf("session: answer MAC検証失敗 — 破棄")
-				return
-			}
-		} else {
-			log.Printf("session: 共有シークレット未設定 — MAC検証なし(開発モード)")
+		// answerのassertionが通らない限りSDPは適用せず、現行セッションにも昇格させない。
+		// 中継サーバーがSDPを書き換えていればチャレンジが食い違うので、ここで落ちる。
+		as, err := decodeAssertion(m)
+		if err == nil {
+			err = a.pm.VerifyAssertion(p.nonce, p.offer, m.SDP, as)
 		}
-		if err := a.sess.HandleAnswer(m.SDP); err != nil {
+		if err != nil {
+			log.Printf("session: 認証失敗: %v", err)
+			p.sess.Close()
+			a.client.Send(map[string]any{"t": "error", "reason": "auth"})
+			return
+		}
+		if err := p.sess.HandleAnswer(m.SDP); err != nil {
 			log.Printf("session: answer適用失敗: %v", err)
+			p.sess.Close()
 			return
 		}
-		log.Printf("session: answer適用")
+		a.promote(p.sess)
+		log.Printf("session: 認証OK — answer適用")
 	}
+}
+
+func decodeAssertion(m clientMsg) (pair.Assertion, error) {
+	clientData, err := pair.B64Decode(m.ClientData)
+	if err != nil {
+		return pair.Assertion{}, fmt.Errorf("clientData: %w", err)
+	}
+	authData, err := pair.B64Decode(m.AuthData)
+	if err != nil {
+		return pair.Assertion{}, fmt.Errorf("authData: %w", err)
+	}
+	sig, err := pair.B64Decode(m.Sig)
+	if err != nil {
+		return pair.Assertion{}, fmt.Errorf("sig: %w", err)
+	}
+	return pair.Assertion{
+		CredID: m.CredID, ClientData: clientData, AuthData: authData, Signature: sig,
+	}, nil
 }
 
 // mediaOptions は選択中モニタに合わせたキャプチャ設定を作り、
@@ -327,20 +488,22 @@ func (a *app) handleVoice(s string) {
 }
 
 func (a *app) sendVoiceResult(utterance, cmd, errMsg string) {
-	if a.sess == nil {
+	sess := a.session()
+	if sess == nil {
 		return
 	}
 	msg := map[string]any{"t": "voice", "s": utterance, "cmd": cmd}
 	if errMsg != "" {
 		msg["err"] = errMsg
 	}
-	if err := a.sess.Send(msg); err != nil {
+	if err := sess.Send(msg); err != nil {
 		log.Printf("session: voice結果送信失敗: %v", err)
 	}
 }
 
 func (a *app) sendDisplays() {
-	if a.sess == nil {
+	sess := a.session()
+	if sess == nil {
 		return
 	}
 	mons := display.List()
@@ -348,18 +511,19 @@ func (a *app) sendDisplays() {
 	if n == 0 {
 		n = 1
 	}
-	if err := a.sess.Send(map[string]any{"t": "displays", "n": n, "cur": a.display}); err != nil {
+	if err := sess.Send(map[string]any{"t": "displays", "n": n, "cur": a.display}); err != nil {
 		log.Printf("session: displays送信失敗: %v", err)
 	}
 }
 
 func (a *app) switchDisplay(n int) {
+	sess := a.session()
 	mons := display.List()
-	if a.sess == nil || n < 0 || n >= len(mons) || n == a.display {
+	if sess == nil || n < 0 || n >= len(mons) || n == a.display {
 		return
 	}
 	a.display = n
 	log.Printf("session: ディスプレイ切替 → %d (%s)", n, mons[n].Device)
-	a.sess.SetMediaOptions(a.mediaOptions(mons))
+	sess.SetMediaOptions(a.mediaOptions(mons))
 	a.sendDisplays()
 }

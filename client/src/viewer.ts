@@ -3,16 +3,16 @@
 import { SignalChannel } from "./signal";
 import { InputController } from "./input";
 import { VirtualKeyboard } from "./keyboard";
-import { hmacSDP } from "./crypto";
+import { assertPasskey, b64uDecode } from "./webauthn";
+import { loadCredId, saveCredId } from "./config";
 import { VoiceInput, voiceSupported } from "./voice";
-import type { Paired } from "./config";
 
 const ICE_SERVERS: RTCIceServer[] = [
   { urls: "stun:stun.cloudflare.com:3478" },
   { urls: "stun:stun.l.google.com:19302" },
 ];
 
-export function renderViewer(app: HTMLElement, paired: Paired, onExit: () => void): void {
+export function renderViewer(app: HTMLElement, hostId: string, onExit: () => void): void {
   app.innerHTML = `
     <div class="viewer" id="vroot">
       <video id="screen" autoplay playsinline muted></video>
@@ -39,6 +39,7 @@ export function renderViewer(app: HTMLElement, paired: Paired, onExit: () => voi
   let exited = false;
   let retryTimer = 0;
   let toastTimer = 0;
+  let retries = 0; // 連続した自動再接続の回数 (接続成功でリセット)
   // ホストのディスプレイ数と表示中index (ホストからの "displays" 通知で更新)
   let dispCount = 1;
   let dispCur = 0;
@@ -63,10 +64,23 @@ export function renderViewer(app: HTMLElement, paired: Paired, onExit: () => voi
     onExit();
   });
 
-  // 切断・失敗時は少し待って自動で接続し直す
+  // 切断・失敗時は少し待って自動で接続し直す。
+  // 接続のたびにパスキーの認証ダイアログが出るので自動リトライは回数を絞り、
+  // それ以降はタップで明示的にやり直してもらう(ダイアログが延々と出るのを避ける)。
+  const maxAutoRetries = 3;
   const scheduleRetry = (delayMs: number) => {
     if (exited) return;
     clearTimeout(retryTimer);
+    if (retries >= maxAutoRetries) {
+      setStatus("再接続できませんでした — タップして再試行", true);
+      st.onclick = () => {
+        st.onclick = null;
+        retries = 0;
+        requestConnect();
+      };
+      return;
+    }
+    retries++;
     retryTimer = window.setTimeout(() => {
       if (!exited) requestConnect();
     }, delayMs);
@@ -74,6 +88,7 @@ export function renderViewer(app: HTMLElement, paired: Paired, onExit: () => voi
 
   const setStatus = (text: string, error = false) => {
     clearTimeout(toastTimer);
+    st.onclick = null;
     st.textContent = text;
     st.classList.toggle("error", error);
   };
@@ -84,15 +99,7 @@ export function renderViewer(app: HTMLElement, paired: Paired, onExit: () => voi
     toastTimer = window.setTimeout(() => setStatus(""), 2500);
   };
 
-  async function handleOffer(sdp: string, mac: string | undefined): Promise<void> {
-    // HTTPS環境ではofferの改ざん(中継サーバーのなりすまし)を検証する
-    const expected = await hmacSDP(paired.secret, sdp);
-    if (expected !== null) {
-      if (mac !== expected) {
-        setStatus("接続情報の検証に失敗しました(中継サーバーが信頼できません)", true);
-        return;
-      }
-    }
+  async function handleOffer(sdp: string, nonce: string): Promise<void> {
     pc?.close();
     pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
     pc.ontrack = (ev) => {
@@ -149,6 +156,7 @@ export function renderViewer(app: HTMLElement, paired: Paired, onExit: () => voi
       if (!pc) return;
       switch (pc.connectionState) {
         case "connected":
+          retries = 0;
           setStatus("");
           break;
         case "connecting":
@@ -168,17 +176,23 @@ export function renderViewer(app: HTMLElement, paired: Paired, onExit: () => voi
     await pc.setLocalDescription(await pc.createAnswer());
     await waitIceComplete(pc);
     const answerSDP = pc.localDescription!.sdp;
-    const answerMAC = await hmacSDP(paired.secret, answerSDP);
-    ch.send({ t: "answer", sdp: answerSDP, ...(answerMAC ? { mac: answerMAC } : {}) });
+
+    // ホストのnonceとoffer/answerを束ねたチャレンジにパスキーで署名する。
+    // これがホスト側の認証そのものであり、同時にSDPの改ざん検出も兼ねる
+    // (中継サーバーがどちらかを書き換えていれば、ホストでの再計算と一致しない)。
+    setStatus("パスキーで認証中...");
+    const assertion = await assertPasskey(b64uDecode(nonce), sdp, answerSDP, loadCredId());
+    saveCredId(assertion.credId); // 次回から allowCredentials で名指しする
+    ch.send({ t: "answer", sdp: answerSDP, ...assertion });
     setStatus("answer送信、P2P確立待ち...");
   }
 
   const requestConnect = () => {
     setStatus("ホストへ接続要求...");
-    ch.send({ t: "connect", token: paired.token });
+    ch.send({ t: "connect" });
   };
 
-  const ch = new SignalChannel(paired.hostId, {
+  const ch = new SignalChannel(hostId, {
     onOpen: (_ip, peerPresent) => {
       if (peerPresent) {
         requestConnect();
@@ -189,12 +203,22 @@ export function renderViewer(app: HTMLElement, paired: Paired, onExit: () => voi
     onPeerJoined: requestConnect,
     onPeerLeft: () => setStatus("ホストが切断しました", true),
     onMessage: (msg) => {
-      const m = msg as { t: string; sdp?: string; mac?: string; reason?: string };
-      if (m.t === "offer" && m.sdp) {
-        handleOffer(m.sdp, m.mac).catch((e) => setStatus(`offer処理失敗: ${e}`, true));
+      const m = msg as { t: string; sdp?: string; nonce?: string; reason?: string };
+      if (m.t === "offer" && m.sdp && m.nonce) {
+        // 認証ダイアログを閉じられた場合もここに来る。放っておくと復帰手段が
+        // なくなるので、通常の失敗と同じ再接続の流れに乗せる。
+        handleOffer(m.sdp, m.nonce).catch((e) => {
+          setStatus(`接続に失敗しました: ${e}`, true);
+          scheduleRetry(3000);
+        });
       } else if (m.t === "error") {
         if (m.reason === "auth") {
           setStatus("認証に失敗しました。再ペアリングが必要です。", true);
+        } else if (m.reason === "timeout") {
+          setStatus("認証待ちの時間切れです — もう一度お試しください", true);
+          scheduleRetry(1000);
+        } else if (m.reason === "unpaired") {
+          setStatus("PC側に端末が登録されていません。QRコードからペアリングしてください。", true);
         } else {
           setStatus(`ホスト側エラー: ${m.reason}`, true);
         }
