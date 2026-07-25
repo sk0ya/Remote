@@ -29,7 +29,8 @@ type Session struct {
 	mediaMu     sync.Mutex
 	cancelMedia context.CancelFunc
 	mediaOpts   hostmedia.Options
-	OnInput     func(data []byte) // DataChannel "input" の受信
+	OnInput     func(data []byte) // DataChannel "input" のテキスト受信 (操作メッセージ)
+	OnBinary    func(data []byte) // 同バイナリ受信 (音声データのチャンク)
 	OnDCOpen    func()            // DataChannelが開いた(ホスト→クライアント送信可能)
 	OnClosed    func()
 	OnState     func(state string)
@@ -71,6 +72,12 @@ func New(ctx context.Context, mediaOpts hostmedia.Options) (*Session, string, er
 		}
 	})
 	dc.OnMessage(func(msg webrtc.DataChannelMessage) {
+		if !msg.IsString {
+			if s.OnBinary != nil {
+				s.OnBinary(msg.Data)
+			}
+			return
+		}
 		if s.OnInput != nil {
 			s.OnInput(msg.Data)
 		}

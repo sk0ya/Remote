@@ -6,6 +6,7 @@ import (
 	"errors"
 	"log"
 	"strings"
+	"sync"
 	"time"
 
 	"remotehost/internal/config"
@@ -15,6 +16,7 @@ import (
 	"remotehost/internal/pair"
 	"remotehost/internal/session"
 	sig "remotehost/internal/signal"
+	"remotehost/internal/stt"
 	"remotehost/internal/ui"
 	"remotehost/internal/voice"
 )
@@ -34,10 +36,19 @@ type app struct {
 	pm        *pair.Manager
 	client    *sig.Client
 	sess      *session.Session
+	stt       *stt.Engine
 	hostIP    string
 	display   int // 表示中のモニタindex (-1=未選択→プライマリ)
 	setStatus func(string)
+
+	// クライアントから分割送信される音声の組み立て中バッファ
+	audioMu   sync.Mutex
+	audioBuf  []byte
+	audioWant int
 }
+
+// 1発話あたりの音声データの上限 (opusなら数十KB程度。桁違いのものは捨てる)
+const maxAudioBytes = 4 << 20
 
 func main() {
 	cfg, err := config.Load()
@@ -55,7 +66,15 @@ func main() {
 	log.Printf("ペアリングページ: %s", pairURL)
 
 	ctx, cancel := context.WithCancel(context.Background())
-	a := &app{ctx: ctx, cfg: cfg, pm: pm, display: -1, setStatus: func(string) {}}
+	a := &app{
+		ctx: ctx, cfg: cfg, pm: pm, display: -1, setStatus: func(string) {},
+		stt: stt.New(cfg.STTCommand, cfg.STTDir),
+	}
+	if a.stt.Available() {
+		log.Printf("音声認識: %s", cfg.STTCommand)
+	} else {
+		log.Printf("音声認識: 無効 (実行ファイルが見つかりません: %q)", cfg.STTCommand)
+	}
 
 	ui.RunTray(pm, ui.TrayCallbacks{PairPageURL: pairURL, OnQuit: cancel},
 		func(setStatus func(string)) {
@@ -69,6 +88,7 @@ func main() {
 
 	// systray.Quit後にここへ戻る
 	a.closeSession()
+	a.stt.Close()
 }
 
 func (a *app) closeSession() {
@@ -146,7 +166,11 @@ func (a *app) onMessage(msg json.RawMessage, peerIP string) {
 			return
 		}
 		s.OnInput = a.onInput
-		s.OnDCOpen = a.sendDisplays
+		s.OnBinary = a.onAudioChunk
+		s.OnDCOpen = func() {
+			a.sendDisplays()
+			a.stt.Warm() // 最初の発話でモデル読み込みを待たせない
+		}
 		s.OnClosed = func() {
 			log.Printf("session: 終了")
 			a.setStatus(statusIdle(a.pm))
@@ -203,21 +227,79 @@ func (a *app) mediaOptions(mons []display.Monitor) media.Options {
 // 残りは入力注入へ渡す。
 func (a *app) onInput(data []byte) {
 	var m struct {
-		T string `json:"t"`
-		N int    `json:"n"`
-		S string `json:"s"`
+		T   string `json:"t"`
+		N   int    `json:"n"`
+		S   string `json:"s"`
+		Len int    `json:"len"`
 	}
 	if err := json.Unmarshal(data, &m); err == nil {
 		switch m.T {
 		case "disp":
 			a.switchDisplay(m.N)
 			return
+		case "aud":
+			a.beginAudio(m.Len)
+			return
 		case "voice":
+			// クライアント側で認識した場合 (現在は使っていないが互換のため残す)
 			a.handleVoice(m.S)
 			return
 		}
 	}
 	input.Handle(data)
+}
+
+// beginAudio は音声受信の開始通知 {t:"aud", len:<全バイト数>} を受けてバッファを用意する。
+func (a *app) beginAudio(n int) {
+	a.audioMu.Lock()
+	defer a.audioMu.Unlock()
+	if n <= 0 || n > maxAudioBytes {
+		log.Printf("voice: 音声サイズが不正 (%d bytes) — 無視", n)
+		a.audioBuf, a.audioWant = nil, 0
+		return
+	}
+	a.audioBuf = make([]byte, 0, n)
+	a.audioWant = n
+}
+
+// onAudioChunk は音声の分割データを受け取り、宣言サイズに達したら認識へ回す。
+func (a *app) onAudioChunk(data []byte) {
+	a.audioMu.Lock()
+	if a.audioWant == 0 {
+		a.audioMu.Unlock()
+		return // 開始通知なしのバイナリは捨てる
+	}
+	a.audioBuf = append(a.audioBuf, data...)
+	if len(a.audioBuf) < a.audioWant {
+		a.audioMu.Unlock()
+		return
+	}
+	audio := a.audioBuf
+	a.audioBuf, a.audioWant = nil, 0
+	a.audioMu.Unlock()
+
+	// 認識は数百ms〜数秒かかるのでDataChannelの受信を止めない
+	go a.recognize(audio)
+}
+
+// recognize は受け取った音声を文字起こしし、結果を音声コマンド処理へ渡す。
+func (a *app) recognize(audio []byte) {
+	if !a.stt.Available() {
+		a.sendVoiceResult("", "", "PCに音声認識エンジンが設定されていません")
+		return
+	}
+	text, err := a.stt.Recognize(audio)
+	if err != nil {
+		log.Printf("voice: 認識失敗: %v", err)
+		a.sendVoiceResult("", "", err.Error())
+		return
+	}
+	if text == "" {
+		log.Printf("voice: 認識結果なし (%d bytes)", len(audio))
+		a.sendVoiceResult("", "", "聞き取れませんでした")
+		return
+	}
+	a.handleVoice(text)
 }
 
 // handleVoice はスマホ側の音声認識結果を処理する。設定コマンドに一致すればそれを実行し、
@@ -232,23 +314,27 @@ func (a *app) handleVoice(s string) {
 	if !ok {
 		log.Printf("voice: テキスト入力 %q", s)
 		input.Text(s)
-		a.sendVoiceResult(s, "")
+		a.sendVoiceResult(s, "", "")
 		return
 	}
 	if err := voice.Execute(c); err != nil {
 		log.Printf("voice: コマンド %q の実行失敗: %v", c.Name, err)
-		a.sendVoiceResult(s, c.Name+" (失敗)")
+		a.sendVoiceResult(s, c.Name, "実行に失敗しました")
 		return
 	}
 	log.Printf("voice: コマンド実行 %q ← %q", c.Name, s)
-	a.sendVoiceResult(s, c.Name)
+	a.sendVoiceResult(s, c.Name, "")
 }
 
-func (a *app) sendVoiceResult(utterance, cmd string) {
+func (a *app) sendVoiceResult(utterance, cmd, errMsg string) {
 	if a.sess == nil {
 		return
 	}
-	if err := a.sess.Send(map[string]any{"t": "voice", "s": utterance, "cmd": cmd}); err != nil {
+	msg := map[string]any{"t": "voice", "s": utterance, "cmd": cmd}
+	if errMsg != "" {
+		msg["err"] = errMsg
+	}
+	if err := a.sess.Send(msg); err != nil {
 		log.Printf("session: voice結果送信失敗: %v", err)
 	}
 }

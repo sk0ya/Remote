@@ -21,6 +21,19 @@ type Config struct {
 	BitrateMbps     int             `json:"bitrateMbps"`     // 映像ビットレート (既定4)
 	FPS             int             `json:"fps"`             // フレームレート (既定30)
 	VoiceCommands   []voice.Command `json:"voiceCommands"`   // 音声コマンド定義 (未指定ならvoice.Defaults())
+	STTCommand      string          `json:"sttCommand"`      // 音声認識エンジン(jvi-serve)の実行ファイル
+	STTDir          string          `json:"sttDir"`          // その作業ディレクトリ (config.tomlとmodels/がある場所)
+}
+
+// defaultSTT は同梱の音声認識エンジン (stt/) の場所を、実行ファイルの位置から求める。
+// 配置は host/remotehost.exe と stt/ が並ぶリポジトリの構成を前提にする。
+func defaultSTT() (cmdPath, workDir string) {
+	exe, err := os.Executable()
+	if err != nil {
+		return "", ""
+	}
+	workDir = filepath.Clean(filepath.Join(filepath.Dir(exe), "..", "stt"))
+	return filepath.Join(workDir, "target", "release", "remote-stt.exe"), workDir
 }
 
 const defaultSignalURL = "ws://127.0.0.1:8787/ws"
@@ -55,12 +68,15 @@ func Load() (*Config, error) {
 	if err != nil {
 		return nil, err
 	}
+	sttCmd, sttDir := defaultSTT()
 	data, err := os.ReadFile(p)
 	if errors.Is(err, os.ErrNotExist) {
 		c := &Config{
 			HostID:        randomID(16),
 			SignalURL:     defaultSignalURL,
 			VoiceCommands: voice.Defaults(),
+			STTCommand:    sttCmd,
+			STTDir:        sttDir,
 		}
 		if err := c.Save(); err != nil {
 			return nil, err
@@ -86,9 +102,22 @@ func Load() (*Config, error) {
 	if c.FPS <= 0 {
 		c.FPS = 30
 	}
-	// キー自体が無いときだけ初期セットを書き戻す(空配列 [] は「音声コマンド無効」の意思表示)。
+	// キー自体が無いときだけ既定値を書き戻す
+	// (voiceCommandsの空配列 [] は「音声コマンド無効」の意思表示なので上書きしない)。
+	filled := false
 	if c.VoiceCommands == nil {
 		c.VoiceCommands = voice.Defaults()
+		filled = true
+	}
+	if c.STTCommand == "" {
+		c.STTCommand = sttCmd
+		filled = true
+	}
+	if c.STTDir == "" {
+		c.STTDir = sttDir
+		filled = true
+	}
+	if filled {
 		_ = c.Save() // 編集できるようファイルにも残す。失敗しても動作には影響しない
 	}
 	return &c, nil

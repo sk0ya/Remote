@@ -5,7 +5,7 @@
 - **ペアリング**: PCに表示したQRコード+パスワードで、**同一ネットワーク上でのみ**スマホを登録(登録できるのは1端末だけ。再ペアリングすると旧端末は失効)
 - **接続**: ペアリング後は**別ネットワークからでも**接続可能。映像・操作は常に**P2P(WebRTC/DTLS暗号化)**で、外部サーバーは接続開始時の待ち合わせ(シグナリング)にしか使わない
 - **操作**: タップ=クリック / 長押し→ドラッグ / 2本指タップ=右クリック / 2本指スクロール / ピンチズーム / 仮想キーボード(IME対応)
-- **音声**: 🎤を押している間だけ音声認識。定義済みの言い回しならコマンド実行、それ以外は喋った内容をそのままPCへ打ち込む
+- **音声**: 🎤を押している間だけ録音し、**PC側でローカルに認識**(クラウド送信なし)。定義済みの言い回しならコマンド実行、それ以外は喋った内容をそのままPCへ打ち込む
 
 ## 構成
 
@@ -19,11 +19,13 @@
 | `host/` | Windows常駐アプリ (Go + Pion)。画面はffmpegサブプロセス(ddagrab→H.264、NVENC/AMF/QSV/libx264自動選択)、入力はSendInput |
 | `signaling/` | Cloudflare Worker + Durable Object。hostId毎の部屋でメッセージを素通しするだけ(秘密情報は持たない) |
 | `client/` | スマホ用SPA (Vite + TypeScript)。Cloudflare Pagesで配信 |
+| `stt/` | 音声認識エンジン (Rust + sherpa-onnx + ReazonSpeech日本語モデル)。ホストが子プロセスとして常駐させる |
 
 ## 必要なもの
 
 - Windows: Go 1.24+、FFmpeg(`winget install GoLang.Go Gyan.FFmpeg`)
 - Node.js 20+
+- 音声入力を使う場合: Rust(`winget install Rustlang.Rustup`)
 - デプロイ時: Cloudflareアカウント(無料枠でOK)
 
 ## 開発(ローカル)
@@ -83,17 +85,38 @@ npx wrangler pages deploy dist --project-name remote-client
 | `bitrateMbps` | 映像ビットレート | 4 |
 | `fps` | フレームレート | 30 |
 | `voiceCommands` | 音声コマンド定義(下記) | 初回起動時に既定セットを書き込み |
+| `sttCommand` | 音声認識エンジンの実行ファイル | ホストの隣の `../stt/target/release/remote-stt.exe` |
+| `sttDir` | その作業ディレクトリ(`models/` がある場所) | `../stt` |
 
 ## 音声入力・音声コマンド
 
-ビューア右上の🎤を**押している間だけ**認識する(push-to-talk)。離した時点で発話が確定してホストへ送られる。
+ビューア右上の🎤を**押している間だけ**録音する(push-to-talk)。離すと音声がPCへ送られ、**認識はPC側でローカルに**行う。
 
-- 認識はスマホのブラウザ側(Web Speech API, `ja-JP`)。音声はPCへ送らないので、映像・入力の経路は一切変わらない
-- ホストは発話を `voiceCommands` の `phrases` と照合し、**一致すればコマンド実行 / 一致しなければ発話をそのままキー入力**(ディクテーション)
+```
+スマホ: MediaRecorderで録音 ─DataChannel(バイナリ)→ ホスト: ffmpegで16kHzモノラルwav化
+                                                    → jvi-serve(常駐)で認識 → コマンド照合
+```
+
+- ブラウザの音声認識API (`webkitSpeechRecognition`) は使わない。Chromium派生(Vivaldi等)はGoogleのAPIキーを持たず、iOSのサードパーティブラウザにはAPI自体が無いため。**録音だけ**ブラウザにやらせるので、どのブラウザでも動く
+- 認識エンジンは別プロジェクト `C:\Projects\Japanese` (sherpa-onnx + ReazonSpeech日本語モデル) の `jvi-serve`。クラウドには一切送らない
+- 速度は2秒の発話で認識0.1秒程度。モデル読み込み(約5秒)は接続時に済ませておくので発話時には待たない
+- ホストは認識結果を `voiceCommands` の `phrases` と照合し、**一致すればコマンド実行 / 一致しなければ認識結果をそのままキー入力**(ディクテーション)
 - 結果はHUDに表示される(`⚡ メモ帳` = コマンド実行 / `⌨ …` = 打ち込み)
 - 照合は空白・句読点を無視した部分一致。「メモ帳を開いて」は `"メモ帳"` にヒットする。複数一致したときは長いフレーズを優先
-- 要HTTPS(Pages配信なら問題なし)。初回はマイク許可のダイアログが出る。iOS SafariはPWAとして追加した状態だと認識が不安定なことがあるのでSafariで開くのが確実
+- 要HTTPS(Pages配信なら問題なし)。初回はマイク許可のダイアログが出る
 - 対応していないブラウザでは🎤ボタン自体が出ない
+
+### 認識エンジンの準備 (`stt/`)
+
+```powershell
+cd stt
+.\scripts\setup-models.ps1   # モデル取得 (約720MB DL → 使う分だけ残して約160MB)
+cargo build --release        # sherpa-onnxはビルド済みライブラリを取得するのでC++ビルドは不要
+```
+
+`remote-stt.exe` は「stdinにwavのパスを1行 → stdoutに `+認識結果` を1行」を返すだけのプロセスで、ホストが子プロセスとして起動し常駐させる。ホストは既定で `host/remotehost.exe` から見た `../stt/target/release/remote-stt.exe` を探すので、上記のビルドだけで繋がる(別の場所に置くなら `sttCommand` / `sttDir` で指定)。
+
+実行ファイルやモデルが無い場合は**音声機能だけ無効**になり(HUDにその旨が出る)、他の機能はそのまま動く。
 
 ```json
 {

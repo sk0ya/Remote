@@ -50,6 +50,16 @@ export class InputController {
     if (this.dc.readyState === "open") this.dc.send(JSON.stringify(msg));
   }
 
+  // 音声データ用。ホストは文字列メッセージ=操作、バイナリ=音声として扱う。
+  sendBinary(data: ArrayBuffer): void {
+    if (this.dc.readyState === "open") this.dc.send(data);
+  }
+
+  // 送信キューの詰まり具合 (音声を分割送信するときの待ち判断に使う)
+  get buffered(): number {
+    return this.dc.bufferedAmount;
+  }
+
   // 画面座標 → ホスト画面の正規化座標(0..1)。映像の外ならnull。
   private toNorm(clientX: number, clientY: number): Pt | null {
     const r = this.video.getBoundingClientRect();

@@ -1,140 +1,166 @@
-// 音声入力: 🎤ボタンを押している間だけブラウザのWeb Speech APIで認識し、
-// 確定テキストをホストへ送る ({t:"voice"})。
-// コマンド照合はホスト側 (internal/voice) が持つので、こちらは認識に徹する。
+// 音声入力: 🎤を押している間だけマイクを録音し、離したら音声データをホストへ送る。
+// 認識はホスト側 (sherpa-onnx + ReazonSpeech) が行い、結果は {t:"voice"} で返ってくる。
 //
-// 押しっぱなし方式なのは、iOS Safariが無音タイムアウトで勝手に終了し
-// 自動再startが不安定なため。押している間=1発話、離した時点で確定にすると挙動が読める。
+// ブラウザの音声認識API (webkitSpeechRecognition) は使わない。あれはSafari/Chrome以外では
+// 動かない(Vivaldi等のChromium派生はGoogleのAPIキーを持たない、iOSのサードパーティ
+// ブラウザには公開されない)ため、録音だけブラウザにやらせてPCで認識する。
 
-interface SRAlternative {
-  transcript: string;
-}
-interface SRResult {
-  0: SRAlternative;
-  isFinal: boolean;
-}
-interface SREvent {
-  resultIndex: number;
-  results: { length: number; [i: number]: SRResult };
-}
-interface SR {
-  lang: string;
-  continuous: boolean;
-  interimResults: boolean;
-  start(): void;
-  stop(): void;
-  abort(): void;
-  onresult: ((e: SREvent) => void) | null;
-  onerror: ((e: { error: string }) => void) | null;
-  onend: (() => void) | null;
-}
-type SRCtor = new () => SR;
-
-function ctor(): SRCtor | null {
-  const w = window as unknown as { SpeechRecognition?: SRCtor; webkitSpeechRecognition?: SRCtor };
-  return w.SpeechRecognition ?? w.webkitSpeechRecognition ?? null;
-}
+// DataChannelの1メッセージあたりの分割サイズ。実装依存の上限(256KB前後)に対し十分小さく取る。
+const CHUNK = 16 * 1024;
+// 送信キューがこれを超えたら少し待つ (詰め込みすぎでDataChannelを閉じさせないため)
+const BUFFER_LIMIT = 512 * 1024;
+// 誤タップと区別する最短の録音時間
+const MIN_MS = 250;
+// 最後に使ってからこの時間が経ったらマイクを解放する (録音インジケータを消すため)
+const IDLE_RELEASE_MS = 60_000;
 
 export function voiceSupported(): boolean {
-  return ctor() !== null;
+  return typeof MediaRecorder !== "undefined" && !!navigator.mediaDevices?.getUserMedia;
 }
 
-const ERRORS: Record<string, string> = {
-  "not-allowed": "マイクの使用が許可されていません",
-  "service-not-allowed": "マイクの使用が許可されていません",
-  network: "音声認識サーバーに接続できません",
-  "audio-capture": "マイクが使えません",
-};
+// ブラウザによって録れるコンテナが違う (Chrome系:webm/opus, iOS Safari:mp4)。
+// どれで録れてもホスト側はffmpegに判定させるので、対応しているものを選べばよい。
+function pickMimeType(): string | undefined {
+  for (const t of ["audio/webm;codecs=opus", "audio/webm", "audio/mp4"]) {
+    if (MediaRecorder.isTypeSupported(t)) return t;
+  }
+  return undefined; // ブラウザ既定に任せる
+}
+
+type Send = (msg: object) => void;
+type SendBinary = (data: ArrayBuffer) => void;
+type Status = (text: string, error?: boolean) => void;
 
 export class VoiceInput {
-  private rec: SR | null = null;
-  private active = false;
-  private finalText = "";
+  private stream: MediaStream | null = null;
+  private rec: MediaRecorder | null = null;
+  private chunks: BlobPart[] = [];
+  private pressed = false;
+  private startedAt = 0;
+  private idleTimer = 0;
 
   constructor(
     private btn: HTMLButtonElement,
-    private send: (msg: object) => void,
-    private onStatus: (text: string, error?: boolean) => void
+    private send: Send,
+    private sendBinary: SendBinary,
+    private buffered: () => number,
+    private onStatus: Status
   ) {
     // 再接続で作り直されるため、addEventListenerではなくプロパティ代入で重複登録を防ぐ
     btn.onpointerdown = (e) => {
       e.preventDefault(); // 長押しの選択・スクロールを抑止
       btn.setPointerCapture(e.pointerId); // 指がボタン外へずれてもpointerupを受け取る
-      this.start();
+      void this.press();
     };
-    btn.onpointerup = () => this.stop();
-    btn.onpointercancel = () => this.cancel();
+    btn.onpointerup = () => this.release();
+    btn.onpointercancel = () => this.release(true);
   }
 
-  private start(): void {
-    if (this.active) return;
-    const C = ctor();
-    if (!C) return;
-    const rec = new C();
-    rec.lang = "ja-JP";
-    rec.continuous = false;
-    rec.interimResults = true;
-    this.finalText = "";
-
-    rec.onresult = (e) => {
-      let interim = "";
-      for (let i = e.resultIndex; i < e.results.length; i++) {
-        const r = e.results[i];
-        if (r.isFinal) this.finalText += r[0].transcript;
-        else interim += r[0].transcript;
-      }
-      this.onStatus(`🎤 ${this.finalText}${interim}`);
-    };
-    rec.onerror = (e) => {
-      if (e.error === "no-speech" || e.error === "aborted") {
-        this.finalText = "";
-        this.onStatus("");
-        return;
-      }
-      this.finalText = "";
-      this.onStatus(ERRORS[e.error] ?? `音声認識エラー: ${e.error}`, true);
-    };
-    rec.onend = () => {
-      this.active = false;
-      this.rec = null;
-      this.btn.classList.remove("active");
-      this.flush();
-    };
+  private async press(): Promise<void> {
+    if (this.pressed) return;
+    this.pressed = true;
+    this.btn.classList.add("active");
+    clearTimeout(this.idleTimer);
 
     try {
-      rec.start();
-    } catch {
-      return; // 直前のセッションが終了しきっていない場合など
+      await this.ensureStream();
+    } catch (e) {
+      this.pressed = false;
+      this.btn.classList.remove("active");
+      this.onStatus(micError(e), true);
+      return;
     }
+    // マイク取得を待つ間に指が離れていたら録音しない
+    if (!this.pressed || !this.stream) return;
+
+    this.chunks = [];
+    const mimeType = pickMimeType();
+    const rec = new MediaRecorder(this.stream, mimeType ? { mimeType } : undefined);
+    rec.ondataavailable = (e) => {
+      if (e.data.size > 0) this.chunks.push(e.data);
+    };
+    rec.onstop = () => {
+      const blob = new Blob(this.chunks, { type: rec.mimeType });
+      this.chunks = [];
+      void this.upload(blob);
+    };
+    rec.start();
     this.rec = rec;
-    this.active = true;
-    this.btn.classList.add("active");
-    this.onStatus("🎤 …");
+    this.startedAt = Date.now();
+    this.onStatus("🎤 録音中…");
   }
 
-  // 離した時点で確定。結果は onresult → onend の順に来るので flush は onend でやる
-  private stop(): void {
-    this.rec?.stop();
-  }
+  private release(cancel = false): void {
+    if (!this.pressed) return;
+    this.pressed = false;
+    this.btn.classList.remove("active");
+    this.idleTimer = window.setTimeout(() => this.releaseMic(), IDLE_RELEASE_MS);
 
-  private cancel(): void {
-    this.finalText = "";
-    this.rec?.abort();
-  }
-
-  private flush(): void {
-    const text = this.finalText.trim();
-    this.finalText = "";
-    if (!text) {
+    const rec = this.rec;
+    this.rec = null;
+    if (!rec || rec.state === "inactive") {
       this.onStatus("");
       return;
     }
-    this.send({ t: "voice", s: text });
+    if (cancel || Date.now() - this.startedAt < MIN_MS) {
+      // 短すぎる/中断: 録音は止めるが送らない
+      rec.onstop = null;
+      rec.stop();
+      this.chunks = [];
+      this.onStatus("");
+      return;
+    }
+    rec.stop(); // onstop で送信へ
+    this.onStatus("認識中…");
+  }
+
+  private async ensureStream(): Promise<void> {
+    if (this.stream?.active) return;
+    this.stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+  }
+
+  // 音声を「開始通知 + 分割バイナリ」でホストへ送る。
+  private async upload(blob: Blob): Promise<void> {
+    const buf = await blob.arrayBuffer();
+    if (buf.byteLength === 0) {
+      this.onStatus("");
+      return;
+    }
+    this.send({ t: "aud", len: buf.byteLength, mime: blob.type });
+    for (let off = 0; off < buf.byteLength; off += CHUNK) {
+      while (this.buffered() > BUFFER_LIMIT) {
+        await new Promise((r) => setTimeout(r, 20));
+      }
+      this.sendBinary(buf.slice(off, Math.min(off + CHUNK, buf.byteLength)));
+    }
+    // この後はホストからの {t:"voice"} 通知が結果を表示する
+  }
+
+  private releaseMic(): void {
+    this.stream?.getTracks().forEach((t) => t.stop());
+    this.stream = null;
   }
 
   dispose(): void {
     this.btn.onpointerdown = null;
     this.btn.onpointerup = null;
     this.btn.onpointercancel = null;
-    this.cancel();
+    clearTimeout(this.idleTimer);
+    if (this.rec && this.rec.state !== "inactive") {
+      this.rec.onstop = null;
+      this.rec.stop();
+    }
+    this.rec = null;
+    this.pressed = false;
+    this.releaseMic();
   }
+}
+
+function micError(e: unknown): string {
+  const name = e instanceof Error ? e.name : "";
+  if (name === "NotAllowedError" || name === "SecurityError") {
+    return "マイクの使用が許可されていません";
+  }
+  if (name === "NotFoundError") return "マイクが見つかりません";
+  return `マイクを開けません: ${name || String(e)}`;
 }

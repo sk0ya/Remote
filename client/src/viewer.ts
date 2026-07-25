@@ -108,7 +108,13 @@ export function renderViewer(app: HTMLElement, paired: Paired, onExit: () => voi
       if (voiceSupported()) {
         micBtn.style.display = "";
         voice?.dispose();
-        voice = new VoiceInput(micBtn, (msg) => controller.send(msg), setStatus);
+        voice = new VoiceInput(
+          micBtn,
+          (msg) => controller.send(msg),
+          (buf) => controller.sendBinary(buf),
+          () => controller.buffered,
+          setStatus
+        );
       }
       // ホスト→クライアント通知 (ディスプレイ情報・音声の処理結果)
       ev.channel.onmessage = (me) => {
@@ -119,6 +125,7 @@ export function renderViewer(app: HTMLElement, paired: Paired, onExit: () => voi
             cur?: number;
             s?: string;
             cmd?: string;
+            err?: string;
           };
           if (m.t === "displays") {
             dispCount = m.n ?? 1;
@@ -126,7 +133,8 @@ export function renderViewer(app: HTMLElement, paired: Paired, onExit: () => voi
             updateDispBtn();
           } else if (m.t === "voice") {
             // cmdが空 = コマンド未一致 → 発話がそのまま打ち込まれた
-            toast(m.cmd ? `⚡ ${m.cmd}` : `⌨ ${m.s ?? ""}`);
+            if (m.err) toast(`🎤 ${m.err}`, true);
+            else toast(m.cmd ? `⚡ ${m.cmd}` : `⌨ ${m.s ?? ""}`);
           }
         } catch {
           // JSON以外は無視

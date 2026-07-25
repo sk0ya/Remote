@@ -1,0 +1,3 @@
+target/
+# モデルは数百MBあるので配布物には含めない (scripts/setup-models.ps1 で取得する)
+models/

@@ -1,0 +1,15 @@
+[package]
+name = "remote-stt"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "remote-stt"
+path = "src/main.rs"
+
+[dependencies]
+# 静的リンク版。ビルド済みライブラリを取得するのでC++のビルドは不要。
+sherpa-onnx = { version = "1.13.4", default-features = false, features = ["static"] }
+
+[profile.release]
+opt-level = 2
