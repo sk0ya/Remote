@@ -4,6 +4,7 @@ import { SignalChannel } from "./signal";
 import { InputController } from "./input";
 import { VirtualKeyboard } from "./keyboard";
 import { hmacSDP } from "./crypto";
+import { VoiceInput, voiceSupported } from "./voice";
 import type { Paired } from "./config";
 
 const ICE_SERVERS: RTCIceServer[] = [
@@ -20,6 +21,7 @@ export function renderViewer(app: HTMLElement, paired: Paired, onExit: () => voi
         <span id="vst" class="status">接続中...</span>
         <span>
           <button class="ghost" id="disp-toggle" style="display:none"></button>
+          <button class="ghost mic" id="mic" style="display:none">🎤</button>
           <button class="ghost" id="kbd-toggle">⌨</button>
           <button class="ghost" id="exit">切断</button>
         </span>
@@ -30,10 +32,13 @@ export function renderViewer(app: HTMLElement, paired: Paired, onExit: () => voi
   const vroot = document.getElementById("vroot")!;
   const st = document.getElementById("vst")!;
   const dispBtn = document.getElementById("disp-toggle") as HTMLButtonElement;
+  const micBtn = document.getElementById("mic") as HTMLButtonElement;
   let pc: RTCPeerConnection | null = null;
   let keyboard: VirtualKeyboard | null = null;
+  let voice: VoiceInput | null = null;
   let exited = false;
   let retryTimer = 0;
+  let toastTimer = 0;
   // ホストのディスプレイ数と表示中index (ホストからの "displays" 通知で更新)
   let dispCount = 1;
   let dispCur = 0;
@@ -46,6 +51,9 @@ export function renderViewer(app: HTMLElement, paired: Paired, onExit: () => voi
   const cleanup = () => {
     exited = true;
     clearTimeout(retryTimer);
+    clearTimeout(toastTimer);
+    voice?.dispose();
+    voice = null;
     pc?.close();
     pc = null;
     ch.close();
@@ -65,8 +73,15 @@ export function renderViewer(app: HTMLElement, paired: Paired, onExit: () => voi
   };
 
   const setStatus = (text: string, error = false) => {
+    clearTimeout(toastTimer);
     st.textContent = text;
     st.classList.toggle("error", error);
+  };
+
+  // 音声の処理結果など、一定時間で消える表示
+  const toast = (text: string, error = false) => {
+    setStatus(text, error);
+    toastTimer = window.setTimeout(() => setStatus(""), 2500);
   };
 
   async function handleOffer(sdp: string, mac: string | undefined): Promise<void> {
@@ -87,15 +102,31 @@ export function renderViewer(app: HTMLElement, paired: Paired, onExit: () => voi
       if (ev.channel.label !== "input") return;
       const controller = new InputController(video, surface, ev.channel);
       keyboard = new VirtualKeyboard(vroot, (msg) => controller.send(msg));
-      document.getElementById("kbd-toggle")!.addEventListener("click", () => keyboard?.toggle());
-      // ホスト→クライアント通知 (ディスプレイ情報など)
+      // onclick代入で再接続時の重複登録を防ぐ (addEventListenerだと2回目以降トグルが打ち消し合う)
+      (document.getElementById("kbd-toggle") as HTMLButtonElement).onclick = () => keyboard?.toggle();
+      // 音声入力 (対応ブラウザのみ。ボタンのハンドラはプロパティ代入なので再接続でも重複しない)
+      if (voiceSupported()) {
+        micBtn.style.display = "";
+        voice?.dispose();
+        voice = new VoiceInput(micBtn, (msg) => controller.send(msg), setStatus);
+      }
+      // ホスト→クライアント通知 (ディスプレイ情報・音声の処理結果)
       ev.channel.onmessage = (me) => {
         try {
-          const m = JSON.parse(String(me.data)) as { t: string; n?: number; cur?: number };
+          const m = JSON.parse(String(me.data)) as {
+            t: string;
+            n?: number;
+            cur?: number;
+            s?: string;
+            cmd?: string;
+          };
           if (m.t === "displays") {
             dispCount = m.n ?? 1;
             dispCur = m.cur ?? 0;
             updateDispBtn();
+          } else if (m.t === "voice") {
+            // cmdが空 = コマンド未一致 → 発話がそのまま打ち込まれた
+            toast(m.cmd ? `⚡ ${m.cmd}` : `⌨ ${m.s ?? ""}`);
           }
         } catch {
           // JSON以外は無視

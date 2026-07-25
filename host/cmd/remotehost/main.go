@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"log"
+	"strings"
 	"time"
 
 	"remotehost/internal/config"
@@ -15,6 +16,7 @@ import (
 	"remotehost/internal/session"
 	sig "remotehost/internal/signal"
 	"remotehost/internal/ui"
+	"remotehost/internal/voice"
 )
 
 type clientMsg struct {
@@ -197,18 +199,58 @@ func (a *app) mediaOptions(mons []display.Monitor) media.Options {
 	return opts
 }
 
-// onInput はDataChannelメッセージを振り分ける。ディスプレイ切替だけここで拾い、
+// onInput はDataChannelメッセージを振り分ける。ディスプレイ切替と音声だけここで拾い、
 // 残りは入力注入へ渡す。
 func (a *app) onInput(data []byte) {
 	var m struct {
 		T string `json:"t"`
 		N int    `json:"n"`
+		S string `json:"s"`
 	}
-	if err := json.Unmarshal(data, &m); err == nil && m.T == "disp" {
-		a.switchDisplay(m.N)
-		return
+	if err := json.Unmarshal(data, &m); err == nil {
+		switch m.T {
+		case "disp":
+			a.switchDisplay(m.N)
+			return
+		case "voice":
+			a.handleVoice(m.S)
+			return
+		}
 	}
 	input.Handle(data)
+}
+
+// handleVoice はスマホ側の音声認識結果を処理する。設定コマンドに一致すればそれを実行し、
+// 一致しなければ発話をそのまま打ち込む(ディクテーション)。
+// 処理結果はスマホへ返してHUDに表示する(何が起きたか分からないのがいちばん怖いため)。
+func (a *app) handleVoice(s string) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return
+	}
+	c, ok := voice.Match(a.cfg.VoiceCommands, s)
+	if !ok {
+		log.Printf("voice: テキスト入力 %q", s)
+		input.Text(s)
+		a.sendVoiceResult(s, "")
+		return
+	}
+	if err := voice.Execute(c); err != nil {
+		log.Printf("voice: コマンド %q の実行失敗: %v", c.Name, err)
+		a.sendVoiceResult(s, c.Name+" (失敗)")
+		return
+	}
+	log.Printf("voice: コマンド実行 %q ← %q", c.Name, s)
+	a.sendVoiceResult(s, c.Name)
+}
+
+func (a *app) sendVoiceResult(utterance, cmd string) {
+	if a.sess == nil {
+		return
+	}
+	if err := a.sess.Send(map[string]any{"t": "voice", "s": utterance, "cmd": cmd}); err != nil {
+		log.Printf("session: voice結果送信失敗: %v", err)
+	}
 }
 
 func (a *app) sendDisplays() {

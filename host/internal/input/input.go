@@ -6,6 +6,7 @@ package input
 import (
 	"encoding/json"
 	"log"
+	"strings"
 	"sync"
 	"unsafe"
 
@@ -22,17 +23,17 @@ const (
 	inputMouse    = 0
 	inputKeyboard = 1
 
-	mouseeventfMove       = 0x0001
-	mouseeventfLeftDown   = 0x0002
-	mouseeventfLeftUp     = 0x0004
-	mouseeventfRightDown  = 0x0008
-	mouseeventfRightUp    = 0x0010
-	mouseeventfMiddleDown = 0x0020
-	mouseeventfMiddleUp   = 0x0040
-	mouseeventfWheel      = 0x0800
-	mouseeventfHWheel     = 0x1000
+	mouseeventfMove        = 0x0001
+	mouseeventfLeftDown    = 0x0002
+	mouseeventfLeftUp      = 0x0004
+	mouseeventfRightDown   = 0x0008
+	mouseeventfRightUp     = 0x0010
+	mouseeventfMiddleDown  = 0x0020
+	mouseeventfMiddleUp    = 0x0040
+	mouseeventfWheel       = 0x0800
+	mouseeventfHWheel      = 0x1000
 	mouseeventfVirtualdesk = 0x4000
-	mouseeventfAbsolute   = 0x8000
+	mouseeventfAbsolute    = 0x8000
 
 	smXVirtualScreen  = 76
 	smYVirtualScreen  = 77
@@ -83,14 +84,14 @@ func sendKey(ki keybdInput) {
 // Msg はDataChannel経由の操作メッセージ。
 type Msg struct {
 	T    string  `json:"t"`
-	X    float64 `json:"x,omitempty"`    // mv: 正規化座標 0..1
+	X    float64 `json:"x,omitempty"` // mv: 正規化座標 0..1
 	Y    float64 `json:"y,omitempty"`
-	B    int     `json:"b,omitempty"`    // dn/up: 0=左 1=中 2=右
-	DX   float64 `json:"dx,omitempty"`   // wh: ホイールノッチ数
+	B    int     `json:"b,omitempty"`  // dn/up: 0=左 1=中 2=右
+	DX   float64 `json:"dx,omitempty"` // wh: ホイールノッチ数
 	DY   float64 `json:"dy,omitempty"`
 	Code string  `json:"code,omitempty"` // key: KeyboardEvent.code
 	Down bool    `json:"down,omitempty"`
-	S    string  `json:"s,omitempty"`    // txt: 入力テキスト
+	S    string  `json:"s,omitempty"` // txt: 入力テキスト
 }
 
 // 正規化座標のマップ先モニタ領域(仮想デスクトップ座標)。未設定ならプライマリ全面。
@@ -180,27 +181,59 @@ func Handle(data []byte) {
 			sendMouse(mouseInput{dwFlags: mouseeventfHWheel, mouseData: int32(m.DX * 120)})
 		}
 	case "key":
-		sc, ext, ok := scanCode(m.Code)
-		if !ok {
+		if !Key(m.Code, m.Down) {
 			log.Printf("input: 未対応キー: %s", m.Code)
-			return
 		}
-		var flags uint32 = keyeventfScancode
-		if ext {
-			flags |= keyeventfExtendedkey
-		}
-		if !m.Down {
-			flags |= keyeventfKeyup
-		}
-		sendKey(keybdInput{wScan: sc, dwFlags: flags})
 	case "txt":
-		for _, u := range windows.StringToUTF16(m.S) {
-			if u == 0 {
-				break
-			}
-			sendKey(keybdInput{wScan: u, dwFlags: keyeventfUnicode})
-			sendKey(keybdInput{wScan: u, dwFlags: keyeventfUnicode | keyeventfKeyup})
+		Text(m.S)
+	}
+}
+
+// Key は1キーの押下/解放を送る。未対応のcodeならfalseを返す。
+func Key(code string, down bool) bool {
+	sc, ext, ok := scanCode(code)
+	if !ok {
+		return false
+	}
+	var flags uint32 = keyeventfScancode
+	if ext {
+		flags |= keyeventfExtendedkey
+	}
+	if !down {
+		flags |= keyeventfKeyup
+	}
+	sendKey(keybdInput{wScan: sc, dwFlags: flags})
+	return true
+}
+
+// Combo は ["ControlLeft","KeyC"] のようなキー列を順に押し、逆順で離す(同時押し)。
+// 途中で未対応キーに当たったら、そこまでに押したキーを離して中断する。
+func Combo(codes []string) bool {
+	pressed := make([]string, 0, len(codes))
+	ok := true
+	for _, code := range codes {
+		code = strings.TrimSpace(code)
+		if !Key(code, true) {
+			log.Printf("input: 未対応キー: %s", code)
+			ok = false
+			break
 		}
+		pressed = append(pressed, code)
+	}
+	for i := len(pressed) - 1; i >= 0; i-- {
+		Key(pressed[i], false)
+	}
+	return ok
+}
+
+// Text はUnicodeテキストをそのままキー入力として打ち込む(IMEを介さない)。
+func Text(s string) {
+	for _, u := range windows.StringToUTF16(s) {
+		if u == 0 {
+			break
+		}
+		sendKey(keybdInput{wScan: u, dwFlags: keyeventfUnicode})
+		sendKey(keybdInput{wScan: u, dwFlags: keyeventfUnicode | keyeventfKeyup})
 	}
 }
 

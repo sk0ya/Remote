@@ -69,6 +69,21 @@ button.ghost {
   cursor: pointer;
 }
 
+button.ghost.active {
+  background: #3b6cf5;
+  border-color: #3b6cf5;
+  color: #fff;
+}
+
+/* 押しっぱなしで喋るボタン: 長押しの選択・スクロールを起こさせない */
+button.mic {
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-touch-callout: none;
+  font-size: 15px;
+}
+
 input.field {
   appearance: none;
   border: 1px solid #2a3348;
@@ -126,6 +141,9 @@ input.field {
   background: rgba(17, 19, 24, 0.7);
   border-radius: 8px;
   padding: 4px 10px;
+  /* 認識中のテキストが伸びてもボタンを押し出さない(長文は折り返す) */
+  max-width: 55%;
+  overflow-wrap: anywhere;
 }
 
 .viewer .hud .status:empty {

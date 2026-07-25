@@ -8,16 +8,19 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+
+	"remotehost/internal/voice"
 )
 
 type Config struct {
-	HostID          string `json:"hostId"`
-	SignalURL       string `json:"signalUrl"`
-	ClientURL       string `json:"clientUrl"`       // スマホ用WebアプリのURL(QRに埋め込む)
-	DeviceTokenHash string `json:"deviceTokenHash"` // 登録端末トークンのSHA-256 (base64)
-	SharedSecret    string `json:"sharedSecret"`    // SDP HMAC用共有シークレット (base64)
-	BitrateMbps     int    `json:"bitrateMbps"`     // 映像ビットレート (既定4)
-	FPS             int    `json:"fps"`             // フレームレート (既定30)
+	HostID          string          `json:"hostId"`
+	SignalURL       string          `json:"signalUrl"`
+	ClientURL       string          `json:"clientUrl"`       // スマホ用WebアプリのURL(QRに埋め込む)
+	DeviceTokenHash string          `json:"deviceTokenHash"` // 登録端末トークンのSHA-256 (base64)
+	SharedSecret    string          `json:"sharedSecret"`    // SDP HMAC用共有シークレット (base64)
+	BitrateMbps     int             `json:"bitrateMbps"`     // 映像ビットレート (既定4)
+	FPS             int             `json:"fps"`             // フレームレート (既定30)
+	VoiceCommands   []voice.Command `json:"voiceCommands"`   // 音声コマンド定義 (未指定ならvoice.Defaults())
 }
 
 const defaultSignalURL = "ws://127.0.0.1:8787/ws"
@@ -55,8 +58,9 @@ func Load() (*Config, error) {
 	data, err := os.ReadFile(p)
 	if errors.Is(err, os.ErrNotExist) {
 		c := &Config{
-			HostID:    randomID(16),
-			SignalURL: defaultSignalURL,
+			HostID:        randomID(16),
+			SignalURL:     defaultSignalURL,
+			VoiceCommands: voice.Defaults(),
 		}
 		if err := c.Save(); err != nil {
 			return nil, err
@@ -81,6 +85,11 @@ func Load() (*Config, error) {
 	}
 	if c.FPS <= 0 {
 		c.FPS = 30
+	}
+	// キー自体が無いときだけ初期セットを書き戻す(空配列 [] は「音声コマンド無効」の意思表示)。
+	if c.VoiceCommands == nil {
+		c.VoiceCommands = voice.Defaults()
+		_ = c.Save() // 編集できるようファイルにも残す。失敗しても動作には影響しない
 	}
 	return &c, nil
 }
