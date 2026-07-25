@@ -43,6 +43,10 @@ function el(html: string): HTMLElement {
 }
 
 // ---- ペアリング画面 ----
+// 別のタブ(たいていは接続画面)が同じ部屋に入り直すと、こちらのソケットが蹴られる。
+const REPLACED_MSG =
+  "接続が別のタブに奪われました。他のRemoteのタブを閉じ、PCでQRコードを再表示してやり直してください。";
+
 const PAIR_ERRORS: Record<string, string> = {
   code: "コードが無効か期限切れです。PCで新しいQRコードを表示して読み直してください。",
   password: "パスワードが違います。",
@@ -91,10 +95,10 @@ function renderPair(hostId: string, code: string): void {
 
     const ch = new SignalChannel(hostId, {
       onOpen: (_ip, peerPresent) => {
-        if (peerPresent) {
-          ch.send({ t: "pair", code, password });
-        } else {
+        if (!peerPresent) {
           fail("PCのアプリが起動していません。", ch);
+        } else if (!ch.send({ t: "pair", code, password })) {
+          fail(REPLACED_MSG, ch);
         }
       },
       onMessage: (msg) => {
@@ -107,7 +111,15 @@ function renderPair(hostId: string, code: string): void {
             .then((key) => {
               st.textContent = "登録中...";
               credId = key.credId;
-              ch.send({ t: "pair-key", reg: m.reg ?? "", credId: key.credId, pubKey: key.pubKey });
+              // パスキー作成中に部屋を奪われていることがある。
+              // ここで黙って捨てると「登録中...」のまま固まるので必ず拾う。
+              const sent = ch.send({
+                t: "pair-key",
+                reg: m.reg ?? "",
+                credId: key.credId,
+                pubKey: key.pubKey,
+              });
+              if (!sent) fail(REPLACED_MSG, ch);
             })
             .catch((e) => fail(`パスキーの作成に失敗しました: ${e}`, ch));
         } else if (m.t === "pair-done") {
@@ -122,7 +134,7 @@ function renderPair(hostId: string, code: string): void {
       },
       onClose: (reason) => {
         st.classList.add("error");
-        st.textContent = `接続エラー: ${reason}`;
+        st.textContent = reason === "replaced" ? REPLACED_MSG : `接続エラー: ${reason}`;
         btn.disabled = false;
       },
     });

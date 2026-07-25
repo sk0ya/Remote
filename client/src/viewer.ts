@@ -40,6 +40,10 @@ export function renderViewer(app: HTMLElement, hostId: string, onExit: () => voi
   let retryTimer = 0;
   let toastTimer = 0;
   let retries = 0; // 連続した自動再接続の回数 (接続成功でリセット)
+  // ホストに拒否された等、繰り返しても結果が変わらない状態。
+  // 部屋は role ごとに1本しか持てず、入り直すたびに他のタブを蹴り出してしまうため、
+  // 見込みのない再接続を続けるとペアリング中のタブを妨害することになる。
+  let halted = false;
   // ホストのディスプレイ数と表示中index (ホストからの "displays" 通知で更新)
   let dispCount = 1;
   let dispCur = 0;
@@ -69,7 +73,7 @@ export function renderViewer(app: HTMLElement, hostId: string, onExit: () => voi
   // それ以降はタップで明示的にやり直してもらう(ダイアログが延々と出るのを避ける)。
   const maxAutoRetries = 3;
   const scheduleRetry = (delayMs: number) => {
-    if (exited) return;
+    if (exited || halted) return;
     clearTimeout(retryTimer);
     if (retries >= maxAutoRetries) {
       setStatus("再接続できませんでした — タップして再試行", true);
@@ -183,13 +187,27 @@ export function renderViewer(app: HTMLElement, hostId: string, onExit: () => voi
     setStatus("パスキーで認証中...");
     const assertion = await assertPasskey(b64uDecode(nonce), sdp, answerSDP, loadCredId());
     saveCredId(assertion.credId); // 次回から allowCredentials で名指しする
-    ch.send({ t: "answer", sdp: answerSDP, ...assertion });
+    if (!ch.send({ t: "answer", sdp: answerSDP, ...assertion })) {
+      throw new Error("接続が別のタブに奪われました");
+    }
     setStatus("answer送信、P2P確立待ち...");
   }
 
   const requestConnect = () => {
+    if (halted) return;
     setStatus("ホストへ接続要求...");
-    ch.send({ t: "connect" });
+    if (!ch.send({ t: "connect" })) {
+      // 部屋を奪われている。onCloseで繋ぎ直すので、ここでは知らせるだけ。
+      setStatus("接続が別のタブに奪われました", true);
+    }
+  };
+
+  // これ以上試しても無駄な状態。部屋を明け渡して、他のタブの邪魔をしないようにする。
+  const halt = (text: string) => {
+    halted = true;
+    clearTimeout(retryTimer);
+    setStatus(text, true);
+    ch.close();
   };
 
   const ch = new SignalChannel(hostId, {
@@ -200,7 +218,7 @@ export function renderViewer(app: HTMLElement, hostId: string, onExit: () => voi
         setStatus("ホストがオフラインです。待機中...", true);
       }
     },
-    onPeerJoined: requestConnect,
+    onPeerJoined: () => requestConnect(),
     onPeerLeft: () => setStatus("ホストが切断しました", true),
     onMessage: (msg) => {
       const m = msg as { t: string; sdp?: string; nonce?: string; reason?: string };
@@ -213,22 +231,22 @@ export function renderViewer(app: HTMLElement, hostId: string, onExit: () => voi
         });
       } else if (m.t === "error") {
         if (m.reason === "auth") {
-          setStatus("認証に失敗しました。再ペアリングが必要です。", true);
+          halt("認証に失敗しました。再ペアリングが必要です。");
+        } else if (m.reason === "unpaired") {
+          halt("PC側に端末が登録されていません。QRコードからペアリングしてください。");
         } else if (m.reason === "timeout") {
           setStatus("認証待ちの時間切れです — もう一度お試しください", true);
           scheduleRetry(1000);
-        } else if (m.reason === "unpaired") {
-          setStatus("PC側に端末が登録されていません。QRコードからペアリングしてください。", true);
         } else {
           setStatus(`ホスト側エラー: ${m.reason}`, true);
         }
       }
     },
     onClose: (reason) => {
-      if (exited) return;
+      if (exited || halted) return;
       setStatus(`シグナリング切断: ${reason} — 再接続します...`, true);
       window.setTimeout(() => {
-        if (!exited) ch.connect();
+        if (!exited && !halted) ch.connect();
       }, 3000);
     },
   });

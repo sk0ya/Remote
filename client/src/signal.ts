@@ -58,10 +58,13 @@ export class SignalChannel {
     };
   }
 
-  send(msg: unknown): void {
-    if (this.ws?.readyState === WebSocket.OPEN) {
-      this.ws.send(JSON.stringify(msg));
-    }
+  // 送れたらtrue、ソケットが閉じていればfalse。
+  // 部屋は role ごとに1本で、後から来た接続が先客を蹴り出す(close 4000 "replaced")。
+  // 黙って捨てると呼び出し側が来ない応答を待ち続けるので、必ず結果を返す。
+  send(msg: unknown): boolean {
+    if (this.ws?.readyState !== WebSocket.OPEN) return false;
+    this.ws.send(JSON.stringify(msg));
+    return true;
   }
 
   close(): void {
