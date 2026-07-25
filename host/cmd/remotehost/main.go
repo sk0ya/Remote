@@ -36,6 +36,8 @@ type clientMsg struct {
 	ClientData string `json:"clientData,omitempty"`
 	AuthData   string `json:"authData,omitempty"`
 	Sig        string `json:"sig,omitempty"`
+	// 再接続チケットを使う場合はassertionの代わりにこのMACが載る
+	MAC string `json:"mac,omitempty"`
 }
 
 type app struct {
@@ -301,6 +303,9 @@ func (a *app) onMessage(msg json.RawMessage, peerIP string) {
 		s.OnInput = a.onInput
 		s.OnBinary = a.onAudioChunk
 		s.OnDCOpen = func() {
+			// 再接続チケットの受け渡しはここだけ。DataChannelはDTLSで暗号化された
+			// P2P経路なので、中継サーバーには見えない。
+			a.sendTicket(s)
 			a.sendDisplays()
 			a.stt.Warm() // 最初の発話でモデル読み込みを待たせない
 		}
@@ -329,15 +334,25 @@ func (a *app) onMessage(msg json.RawMessage, peerIP string) {
 			log.Printf("session: 認証待ちでないanswer — 破棄")
 			return
 		}
-		// answerのassertionが通らない限りSDPは適用せず、現行セッションにも昇格させない。
+		// 認証が通らない限りSDPは適用せず、現行セッションにも昇格させない。
 		// 中継サーバーがSDPを書き換えていればチャレンジが食い違うので、ここで落ちる。
-		as, err := decodeAssertion(m)
-		if err == nil {
-			err = a.pm.VerifyAssertion(p.nonce, p.offer, m.SDP, as)
+		// MACがあれば再接続チケット、無ければパスキーのassertionで検証する。
+		// どちらも対象は同じ Challenge(nonce, offer, answer)。
+		var err error
+		if m.MAC != "" {
+			if !a.pm.VerifyTicketMAC(p.nonce, p.offer, m.SDP, m.MAC) {
+				err = errors.New("再接続チケットが無効または期限切れ")
+			}
+		} else {
+			var as pair.Assertion
+			if as, err = decodeAssertion(m); err == nil {
+				err = a.pm.VerifyAssertion(p.nonce, p.offer, m.SDP, as)
+			}
 		}
 		if err != nil {
 			log.Printf("session: 認証失敗: %v", err)
 			p.sess.Close()
+			// 失効したチケットで来た相手には、パスキーからやり直してもらう
 			a.client.Send(map[string]any{"t": "error", "reason": "auth"})
 			return
 		}
@@ -347,7 +362,11 @@ func (a *app) onMessage(msg json.RawMessage, peerIP string) {
 			return
 		}
 		a.promote(p.sess)
-		log.Printf("session: 認証OK — answer適用")
+		if m.MAC != "" {
+			log.Printf("session: 認証OK (再接続チケット) — answer適用")
+		} else {
+			log.Printf("session: 認証OK (パスキー) — answer適用")
+		}
 	}
 }
 
@@ -498,6 +517,18 @@ func (a *app) sendVoiceResult(utterance, cmd, errMsg string) {
 	}
 	if err := sess.Send(msg); err != nil {
 		log.Printf("session: voice結果送信失敗: %v", err)
+	}
+}
+
+// sendTicket は再接続チケットを発行してクライアントへ渡す。
+// これがあるあいだ、再接続で生体認証を求めずに済む。
+// 昇格の前後で取り違えないよう、対象のセッションは呼び出し元から受け取る。
+func (a *app) sendTicket(sess *session.Session) {
+	if sess == nil {
+		return
+	}
+	if err := sess.Send(map[string]any{"t": "ticket", "v": a.pm.IssueTicket()}); err != nil {
+		log.Printf("session: チケット送信失敗: %v", err)
 	}
 }
 

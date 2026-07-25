@@ -3,7 +3,7 @@
 import { SignalChannel } from "./signal";
 import { InputController } from "./input";
 import { VirtualKeyboard } from "./keyboard";
-import { assertPasskey, b64uDecode } from "./webauthn";
+import { assertPasskey, ticketMAC, b64uDecode } from "./webauthn";
 import { loadCredId, saveCredId } from "./config";
 import { VoiceInput, voiceSupported } from "./voice";
 
@@ -44,6 +44,13 @@ export function renderViewer(app: HTMLElement, hostId: string, onExit: () => voi
   // 部屋は role ごとに1本しか持てず、入り直すたびに他のタブを蹴り出してしまうため、
   // 見込みのない再接続を続けるとペアリング中のタブを妨害することになる。
   let halted = false;
+  // 接続要求が進行中かどうか。onOpen / onPeerJoined / リトライがそれぞれ独立に
+  // 撃つと、1回の切断で認証ダイアログが何枚も開いてしまうため1本に絞る。
+  let connecting = false;
+  let connectTimer = 0;
+  // ホストから受け取る再接続チケット。これがあるあいだは生体認証を省ける。
+  // メモリだけに置き、localStorageには書かない(タブを閉じれば消える)。
+  let ticket: string | null = null;
   // ホストのディスプレイ数と表示中index (ホストからの "displays" 通知で更新)
   let dispCount = 1;
   let dispCur = 0;
@@ -56,6 +63,7 @@ export function renderViewer(app: HTMLElement, hostId: string, onExit: () => voi
   const cleanup = () => {
     exited = true;
     clearTimeout(retryTimer);
+    clearTimeout(connectTimer);
     clearTimeout(toastTimer);
     voice?.dispose();
     voice = null;
@@ -137,8 +145,12 @@ export function renderViewer(app: HTMLElement, hostId: string, onExit: () => voi
             s?: string;
             cmd?: string;
             err?: string;
+            v?: string;
           };
-          if (m.t === "displays") {
+          if (m.t === "ticket") {
+            // 中継サーバーを通らないこの経路でしか渡されない
+            ticket = m.v ?? null;
+          } else if (m.t === "displays") {
             dispCount = m.n ?? 1;
             dispCur = m.cur ?? 0;
             updateDispBtn();
@@ -161,16 +173,19 @@ export function renderViewer(app: HTMLElement, hostId: string, onExit: () => voi
       switch (pc.connectionState) {
         case "connected":
           retries = 0;
+          endAttempt();
           setStatus("");
           break;
         case "connecting":
           setStatus("P2P接続中...");
           break;
         case "failed":
+          endAttempt();
           setStatus("P2P接続失敗 — 再接続します...", true);
           scheduleRetry(3000);
           break;
         case "disconnected":
+          endAttempt();
           setStatus("接続が不安定です...", true);
           scheduleRetry(5000);
           break;
@@ -181,30 +196,56 @@ export function renderViewer(app: HTMLElement, hostId: string, onExit: () => voi
     await waitIceComplete(pc);
     const answerSDP = pc.localDescription!.sdp;
 
-    // ホストのnonceとoffer/answerを束ねたチャレンジにパスキーで署名する。
+    // ホストのnonceとoffer/answerを束ねたチャレンジに署名する。
     // これがホスト側の認証そのものであり、同時にSDPの改ざん検出も兼ねる
     // (中継サーバーがどちらかを書き換えていれば、ホストでの再計算と一致しない)。
-    setStatus("パスキーで認証中...");
-    const assertion = await assertPasskey(b64uDecode(nonce), sdp, answerSDP, loadCredId());
-    saveCredId(assertion.credId); // 次回から allowCredentials で名指しする
-    if (!ch.send({ t: "answer", sdp: answerSDP, ...assertion })) {
+    // 有効なチケットがあればHMACで済ませ、生体認証のダイアログを出さない。
+    let auth: Record<string, string>;
+    if (ticket) {
+      setStatus("再接続中...");
+      auth = { mac: await ticketMAC(ticket, b64uDecode(nonce), sdp, answerSDP) };
+    } else {
+      setStatus("パスキーで認証中...");
+      const assertion = await assertPasskey(b64uDecode(nonce), sdp, answerSDP, loadCredId());
+      saveCredId(assertion.credId); // 次回から allowCredentials で名指しする
+      auth = { ...assertion };
+    }
+    if (!ch.send({ t: "answer", sdp: answerSDP, ...auth })) {
       throw new Error("接続が別のタブに奪われました");
     }
     setStatus("answer送信、P2P確立待ち...");
   }
 
   const requestConnect = () => {
-    if (halted) return;
+    if (halted || connecting) return;
+    // シグナリングが瞬断しただけならP2Pは生きている。張り直す必要はない
+    // (再ネゴシエーションは映像の途切れと、チケットが無ければ認証ダイアログを招く)。
+    if (pc?.connectionState === "connected") return;
     setStatus("ホストへ接続要求...");
     if (!ch.send({ t: "connect" })) {
       // 部屋を奪われている。onCloseで繋ぎ直すので、ここでは知らせるだけ。
       setStatus("接続が別のタブに奪われました", true);
+      return;
     }
+    connecting = true;
+    clearTimeout(connectTimer);
+    // 応答が来ないまま固まったとき、次の試行を永久に塞がないための保険
+    connectTimer = window.setTimeout(() => {
+      connecting = false;
+      setStatus("ホストから応答がありません", true);
+      scheduleRetry(2000);
+    }, 45_000);
+  };
+
+  const endAttempt = () => {
+    connecting = false;
+    clearTimeout(connectTimer);
   };
 
   // これ以上試しても無駄な状態。部屋を明け渡して、他のタブの邪魔をしないようにする。
   const halt = (text: string) => {
     halted = true;
+    endAttempt();
     clearTimeout(retryTimer);
     setStatus(text, true);
     ch.close();
@@ -226,23 +267,36 @@ export function renderViewer(app: HTMLElement, hostId: string, onExit: () => voi
         // 認証ダイアログを閉じられた場合もここに来る。放っておくと復帰手段が
         // なくなるので、通常の失敗と同じ再接続の流れに乗せる。
         handleOffer(m.sdp, m.nonce).catch((e) => {
+          endAttempt();
           setStatus(`接続に失敗しました: ${e}`, true);
           scheduleRetry(3000);
         });
       } else if (m.t === "error") {
         if (m.reason === "auth") {
-          halt("認証に失敗しました。再ペアリングが必要です。");
+          endAttempt();
+          if (ticket) {
+            // チケットの期限切れ。パスキーからやり直せば通る
+            ticket = null;
+            setStatus("認証し直しています...", true);
+            scheduleRetry(500);
+          } else {
+            halt("認証に失敗しました。再ペアリングが必要です。");
+          }
         } else if (m.reason === "unpaired") {
           halt("PC側に端末が登録されていません。QRコードからペアリングしてください。");
         } else if (m.reason === "timeout") {
+          endAttempt();
           setStatus("認証待ちの時間切れです — もう一度お試しください", true);
           scheduleRetry(1000);
         } else {
+          endAttempt();
           setStatus(`ホスト側エラー: ${m.reason}`, true);
         }
       }
     },
     onClose: (reason) => {
+      // ソケットが死んだ時点で交渉中の要求は無効。次の試行を塞がないよう畳む。
+      endAttempt();
       if (exited || halted) return;
       setStatus(`シグナリング切断: ${reason} — 再接続します...`, true);
       window.setTimeout(() => {

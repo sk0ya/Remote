@@ -90,6 +90,8 @@ type Manager struct {
 	attempts   int       // 現コードに対する失敗回数
 	regExpiry  time.Time // パスキー登録を受け付ける期限 (ゼロ値なら受け付けない)
 	regToken   string    // 登録を許可した相手に渡した合言葉 (Registerで照合)
+	ticket     []byte    // 再接続チケット (ticket.go。メモリのみ、設定には保存しない)
+	ticketExp  time.Time
 }
 
 func NewManager(cfg *config.Config) *Manager {
@@ -231,5 +233,7 @@ func (m *Manager) Unpair() error {
 	m.cfg.CredentialKey = ""
 	m.regExpiry = time.Time{}
 	m.regToken = ""
+	m.ticket = nil
+	m.ticketExp = time.Time{}
 	return m.cfg.Save()
 }

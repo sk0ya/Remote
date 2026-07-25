@@ -3,6 +3,7 @@ package pair
 import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
+	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/x509"
@@ -10,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"testing"
+	"time"
 
 	"remotehost/internal/config"
 )
@@ -250,4 +252,83 @@ func signAssertion(t *testing.T, key *ecdsa.PrivateKey, credID, origin string, c
 		t.Fatal(err)
 	}
 	return Assertion{CredID: credID, ClientData: cd, AuthData: authData, Signature: sig}
+}
+
+// TestTicket は再接続チケットの検証を確認する。
+// チケットはパスキーの代わりに使えるので、対象SDPへの束縛と期限が命綱になる。
+func TestTicket(t *testing.T) {
+	const (
+		offerSDP  = "v=0\r\no=- 1 1 IN IP4 0.0.0.0\r\n"
+		answerSDP = "v=0\r\no=- 2 2 IN IP4 0.0.0.0\r\n"
+	)
+	nonce := Nonce()
+	mac := func(m *Manager, ticket string, nonce []byte, offer, answer string) string {
+		t.Helper()
+		key, err := B64Decode(ticket)
+		if err != nil {
+			t.Fatal(err)
+		}
+		h := hmac.New(sha256.New, key)
+		h.Write(Challenge(nonce, offer, answer))
+		return base64.RawURLEncoding.EncodeToString(h.Sum(nil))
+	}
+
+	t.Run("発行したチケットで通る", func(t *testing.T) {
+		m := NewManager(&config.Config{})
+		tk := m.IssueTicket()
+		if !m.VerifyTicketMAC(nonce, offerSDP, answerSDP, mac(m, tk, nonce, offerSDP, answerSDP)) {
+			t.Fatal("正しいMACが通らなかった")
+		}
+	})
+
+	t.Run("SDPが書き換えられたら落ちる", func(t *testing.T) {
+		m := NewManager(&config.Config{})
+		tk := m.IssueTicket()
+		got := mac(m, tk, nonce, offerSDP, answerSDP)
+		if m.VerifyTicketMAC(nonce, offerSDP, answerSDP+"a=x\r\n", got) {
+			t.Fatal("書き換えられたanswerが通ってしまった")
+		}
+		if m.VerifyTicketMAC(nonce, offerSDP+"a=x\r\n", answerSDP, got) {
+			t.Fatal("書き換えられたofferが通ってしまった")
+		}
+	})
+
+	t.Run("別セッションのnonceでは通らない", func(t *testing.T) {
+		m := NewManager(&config.Config{})
+		tk := m.IssueTicket()
+		if m.VerifyTicketMAC(Nonce(), offerSDP, answerSDP, mac(m, tk, nonce, offerSDP, answerSDP)) {
+			t.Fatal("nonce不一致が通ってしまった")
+		}
+	})
+
+	t.Run("再発行で古いチケットは失効する", func(t *testing.T) {
+		m := NewManager(&config.Config{})
+		old := m.IssueTicket()
+		m.IssueTicket()
+		if m.VerifyTicketMAC(nonce, offerSDP, answerSDP, mac(m, old, nonce, offerSDP, answerSDP)) {
+			t.Fatal("古いチケットが通ってしまった")
+		}
+	})
+
+	t.Run("期限切れは通らない", func(t *testing.T) {
+		m := NewManager(&config.Config{})
+		tk := m.IssueTicket()
+		got := mac(m, tk, nonce, offerSDP, answerSDP)
+		m.mu.Lock()
+		m.ticketExp = time.Now().Add(-time.Second)
+		m.mu.Unlock()
+		if m.VerifyTicketMAC(nonce, offerSDP, answerSDP, got) {
+			t.Fatal("期限切れのチケットが通ってしまった")
+		}
+		if m.HasTicket() {
+			t.Fatal("期限切れなのに HasTicket() = true")
+		}
+	})
+
+	t.Run("未発行なら常に落ちる", func(t *testing.T) {
+		m := NewManager(&config.Config{})
+		if m.VerifyTicketMAC(nonce, offerSDP, answerSDP, "AAAA") {
+			t.Fatal("チケット未発行で通ってしまった")
+		}
+	})
 }

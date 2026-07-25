@@ -144,6 +144,31 @@ export async function assertPasskey(
   };
 }
 
+// ticketMAC は再接続チケットを鍵にしたHMACを作る。
+// 署名対象は assertPasskey とまったく同じチャレンジなので、生体認証を省いても
+// SDPの改ざん検出とリプレイ耐性は変わらない。チャレンジの組み立てを1か所に
+// 保つため、パスキーと同じこのファイルに置いている。
+export async function ticketMAC(
+  ticket: string,
+  nonce: Uint8Array,
+  offerSDP: string,
+  answerSDP: string
+): Promise<string> {
+  const key = await crypto.subtle.importKey(
+    "raw",
+    toBuffer(b64uDecode(ticket)),
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"]
+  );
+  const mac = await crypto.subtle.sign(
+    "HMAC",
+    key,
+    toBuffer(await challenge(nonce, offerSDP, answerSDP))
+  );
+  return b64u(mac);
+}
+
 // recoverHostId はパスキーのuserHandleから接続先ホストIDを取り出す。
 // 資格情報IDも一緒に返し、以降はそれを名指しできるようにする。
 // 別ブラウザで初めて開いたときに使う(ここでも生体認証が1回入る)。
