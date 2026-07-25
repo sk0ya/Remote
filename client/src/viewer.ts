@@ -19,13 +19,13 @@ export function renderViewer(app: HTMLElement, paired: Paired, onExit: () => voi
       <div class="surface" id="surface"></div>
       <div class="hud">
         <span id="vst" class="status">接続中...</span>
-        <span>
+        <span class="hud-btns">
           <button class="ghost" id="disp-toggle" style="display:none"></button>
-          <button class="ghost mic" id="mic" style="display:none">🎤</button>
           <button class="ghost" id="kbd-toggle">⌨</button>
           <button class="ghost" id="exit">切断</button>
         </span>
       </div>
+      <button class="mic" id="mic" style="display:none">🎤</button>
     </div>`;
   const video = document.getElementById("screen") as HTMLVideoElement;
   const surface = document.getElementById("surface")!;
