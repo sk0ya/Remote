@@ -4,7 +4,6 @@
 package media
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"fmt"
@@ -33,13 +32,24 @@ const (
 	capH = 720
 )
 
-// フレーム1枚に与える長さの範囲。画面が静止しているあいだフレームは出ないので、
-// 動き出したときの間隔はいくらでも伸びうる。RTPの時計を飛ばしすぎない上限と、
-// 同時刻に2枚出たときに0幅にしないための下限。
-const (
-	minSampleGap = time.Millisecond
-	maxSampleGap = 5 * time.Second
-)
+// 同時刻に2枚出たときに0幅のフレームを作らないための下限。
+// 上限は設けない。静止していた時間はそのままRTPの時計に乗せる (paceKeeper参照)。
+const minSampleGap = time.Millisecond
+
+// フレームの終わりとみなす無通信時間。
+//
+// Annex-B は「次のフレームの先頭が届いたとき」にしか前のフレームの終わりが
+// 分からない。dup_frames=0 にしてからは、画面が止まると次のフレームが何分も
+// 来ないので、素直に待つと「指を止めた瞬間の画面」がいつまでも届かない。
+// カーソルは常に一手前の位置に見え、クリックした結果も次に画面が動くまで
+// 出てこないので、操作そのものが成立しなくなる。
+// ffmpegは1フレームを一気に書き出すので、書き込みが途切れたことを区切りに使う。
+//
+// 短くすると動いているあいだの遅延も減るが、ffmpeg側が1フレームの途中で
+// 止まった隙に切り出してしまうと、そのフレームだけ崩れる。
+// フレーム間隔 (30fpsで33ms) より短く、かつスケジューリングの揺れでは
+// 踏まない程度に取る。
+const idleFlush = 20 * time.Millisecond
 
 // 強制IDRの間隔(秒)。パケロスからの復帰はここまで待たされる。
 const keyframeSec = 2
@@ -285,6 +295,10 @@ func buildArgs(p pipeline, o Options) []string {
 		"-g", fmt.Sprint(o.FPS*keyframeSec),
 		"-force_key_frames", fmt.Sprintf("expr:gte(t,n_forced*%d)", keyframeSec),
 		"-bf", "0",
+		// 出力はパイプなので1フレームごとに押し出す。既定では出力バッファ(32KB)が
+		// 埋まるまで溜めるので、フレームは次のフレームに押し出されて初めて出てくる。
+		// dup_frames=0 では次が何分も来ないため、そのあいだ画面が更新されない。
+		"-flush_packets", "1",
 		"-f", "h264", "-",
 	)
 	return args
@@ -292,33 +306,37 @@ func buildArgs(p pipeline, o Options) []string {
 
 // Sample は1アクセスユニット(1フレーム)分のAnnex-Bデータ。
 type Sample struct {
-	Data     []byte
-	Duration time.Duration
+	Data []byte
+	// 前に送れたフレームからの実経過時間。RTPの時計をこのぶん進めてから
+	// このフレームを送ると、タイムスタンプが実際に撮れた時刻と一致する。
+	// 1枚目は基準が無いので0。
+	Gap time.Duration
 }
 
 // paceKeeper はフレームの実間隔を測る。dup_frames=0 でフレームレートが可変に
 // なったため、公称fpsから求めた固定値ではRTPタイムスタンプが実時間からずれていく。
-// 送れなかったフレームの時間は次のフレームへ繰り越し、映像が早送りになるのを防ぐ。
+//
+// 測るのは「最後に送れたフレームからの経過時間」。捨てたフレームのぶんも
+// 次のフレームにそのまま乗るので、映像が早送りにならない。
+// 静止していた時間は何分でもそのまま乗せる。頭打ちにすると、そのぶん
+// RTPの時計が実時間から遅れ、ずれは静止のたびに積み上がっていく。
+// 受け側はRTPの間隔と到着の間隔の差を伝送遅延とみなすので、これは
+// 「回線が数十秒詰まっている」と申告しているのと同じことになり、
+// ジッタバッファが膨らんで映像が遅れて出るようになる。
 type paceKeeper struct {
-	nominal time.Duration // 前フレームが無いときに使う公称の1枚分
-	last    time.Time
-	carry   time.Duration
+	lastSent time.Time
 }
 
-// next は今回のフレームに与える長さを返す。
-func (p *paceKeeper) next(t time.Time) time.Duration {
-	d := p.nominal
-	if !p.last.IsZero() {
-		d = min(max(t.Sub(p.last), minSampleGap), maxSampleGap)
+// gap は t に撮れたフレームを送る前に、RTPの時計をどれだけ進めるかを返す。
+func (p *paceKeeper) gap(t time.Time) time.Duration {
+	if p.lastSent.IsZero() {
+		return 0
 	}
-	p.last = t
-	d += p.carry
-	p.carry = 0
-	return d
+	return max(t.Sub(p.lastSent), minSampleGap)
 }
 
-// dropped は next で得た長さのフレームを送れなかったことを伝える。
-func (p *paceKeeper) dropped(d time.Duration) { p.carry = d }
+// sent は実際に送れたことを伝える。次の間隔はここからの経過時間になる。
+func (p *paceKeeper) sent(t time.Time) { p.lastSent = t }
 
 // Capture は画面キャプチャを開始し、フレームを ch に送る。ctxキャンセルで停止。
 func Capture(ctx context.Context, opts Options, ch chan<- Sample) error {
@@ -367,7 +385,7 @@ func runPipeline(ctx context.Context, p pipeline, opts Options, ch chan<- Sample
 		}
 	}()
 
-	err = readAccessUnits(bufio.NewReaderSize(stdout, 1<<20), opts, ch, firstFrame, time.Now)
+	err = readAccessUnits(stdout, ch, firstFrame, time.Now)
 	if s := stderr.String(); s != "" {
 		return fmt.Errorf("%w (ffmpeg: %s)", err, s)
 	}
@@ -377,12 +395,15 @@ func runPipeline(ctx context.Context, p pipeline, opts Options, ch chan<- Sample
 // readAccessUnits は Annex-B ストリームをNAL単位で読み、アクセスユニット境界で
 // フレームとして送出する。境界判定は「first_mb_in_slice==0 のVCL NAL」
 // (ペイロード先頭バイトの最上位ビットが1 = ue(v)の0)を新フレーム開始とみなす定石を使う。
-func readAccessUnits(r *bufio.Reader, opts Options, ch chan<- Sample, firstFrame chan struct{}, now func() time.Time) error {
+//
+// 次のAUの先頭を待つだけでは、静止した瞬間のフレームが出てこない。
+// 書き込みが idleFlush のあいだ途切れたら、そこをフレームの終わりとみなす。
+func readAccessUnits(r io.Reader, ch chan<- Sample, firstFrame chan struct{}, now func() time.Time) error {
 	var buf []byte    // 未処理バイト
 	var au []byte     // 組み立て中のアクセスユニット
 	auHasVCL := false // 現在のAUにスライスNALが含まれるか
 	first := true
-	pace := &paceKeeper{nominal: time.Second / time.Duration(opts.FPS)}
+	pace := &paceKeeper{}
 
 	flush := func() {
 		if len(au) == 0 {
@@ -392,47 +413,99 @@ func readAccessUnits(r *bufio.Reader, opts Options, ch chan<- Sample, firstFrame
 			close(firstFrame)
 			first = false
 		}
-		d := pace.next(now())
-		sample := Sample{Data: append([]byte(nil), au...), Duration: d}
+		t := now()
+		sample := Sample{Data: append([]byte(nil), au...), Gap: pace.gap(t)}
 		select {
 		case ch <- sample:
+			pace.sent(t)
 		default:
 			// 受け側が詰まったら古いフレームは捨てる(遅延蓄積防止)。
-			// ただし時間は次のフレームへ繰り越す。
-			pace.dropped(d)
+			// lastSent を進めないので、捨てたぶんの時間は次のフレームに乗る。
 		}
 		au = au[:0]
 		auHasVCL = false
 	}
 
-	tmp := make([]byte, 64*1024)
-	for {
-		n, err := r.Read(tmp)
-		if n > 0 {
-			buf = append(buf, tmp[:n]...)
-			for {
-				nal, rest, ok := nextNAL(buf)
-				if !ok {
-					break
-				}
-				buf = rest
-				nalType := nal[startCodeLen(nal)] & 0x1f
-				isVCL := nalType >= 1 && nalType <= 5
-				if isVCL && auHasVCL && isFirstSlice(nal) {
-					flush()
-				}
-				au = append(au, nal...)
-				if isVCL {
-					auHasVCL = true
-				}
+	// NAL1本をAUへ積む。スライスNALの先頭は次のAUの始まりなので、そこで区切る。
+	feed := func(nal []byte) {
+		h := startCodeLen(nal)
+		if h >= len(nal) {
+			return // スタートコードだけで中身が無い
+		}
+		nalType := nal[h] & 0x1f
+		isVCL := nalType >= 1 && nalType <= 5
+		if isVCL && auHasVCL && isFirstSlice(nal) {
+			flush()
+		}
+		au = append(au, nal...)
+		if isVCL {
+			auHasVCL = true
+		}
+	}
+
+	// 最後のNALは次のスタートコードが来ないと nextNAL で取り出せない。
+	// 無通信になった時点で、残りをそのまま最後のNALとして拾う。
+	takeRest := func() {
+		if start := indexStartCode(buf, 0); start >= 0 {
+			feed(buf[start:])
+		}
+		buf = nil
+	}
+
+	// Readはブロックするので、無通信を検出するには別ゴルーチンで読むしかない。
+	type read struct {
+		b   []byte
+		err error
+	}
+	reads := make(chan read, 4)
+	done := make(chan struct{})
+	defer close(done)
+	go func() {
+		for {
+			tmp := make([]byte, 64*1024)
+			n, err := r.Read(tmp)
+			select {
+			case reads <- read{tmp[:n], err}:
+			case <-done:
+				return
+			}
+			if err != nil {
+				return
 			}
 		}
-		if err != nil {
-			flush()
-			if err == io.EOF {
-				return fmt.Errorf("ffmpeg終了")
+	}()
+
+	idle := time.NewTimer(idleFlush)
+	defer idle.Stop()
+	for {
+		select {
+		case rd := <-reads:
+			if len(rd.b) > 0 {
+				buf = append(buf, rd.b...)
+				for {
+					nal, rest, ok := nextNAL(buf)
+					if !ok {
+						break
+					}
+					buf = rest
+					feed(nal)
+				}
+				idle.Stop()
+				idle.Reset(idleFlush)
 			}
-			return err
+			if rd.err != nil {
+				takeRest()
+				flush()
+				if rd.err == io.EOF {
+					return fmt.Errorf("ffmpeg終了")
+				}
+				return rd.err
+			}
+		case <-idle.C:
+			// 次のフレームを待たずに、いま出来ているぶんを送る。
+			// 送るものが無ければ何もしない (次の書き込みでまた張り直す)。
+			takeRest()
+			flush()
 		}
 	}
 }

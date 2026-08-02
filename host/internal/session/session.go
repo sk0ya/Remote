@@ -206,16 +206,39 @@ func (s *Session) startMedia() {
 			case <-ctx.Done():
 				return
 			case sample := <-ch:
-				if err := s.track.WriteSample(media.Sample{
-					Data:     sample.Data,
-					Duration: sample.Duration,
-				}); err != nil {
+				if err := writeSample(s.track, sample); err != nil {
 					log.Printf("session: WriteSample失敗: %v", err)
 					return
 				}
 			}
 		}
 	}()
+}
+
+// sampleWriter は *webrtc.TrackLocalStaticSample を差し替えられるようにするためだけの型。
+type sampleWriter interface {
+	WriteSample(media.Sample) error
+}
+
+// writeSample は1フレームをトラックへ書く。
+//
+// Pion の Duration は「このサンプルを送ったあとに時計をどれだけ進めるか」で、
+// フレーム自身のタイムスタンプには効かない。間隔をフレームに持たせると、
+// RTPタイムスタンプは常に1フレーム前の時刻を指すことになる。
+// フレームレートが固定なら1枚ぶんのずれで済むが、dup_frames=0 では前の
+// フレームとの間隔が何分にもなりうる。静止のあとに動かした瞬間、
+// 「実時間では33msしか経っていないのにRTPでは数分進む」フレームが出て、
+// 受け側のジッタバッファが狂う (映像が遅れて出る・固まる)。
+// 中身の無いサンプルで先に時計だけ進めておけば、フレームには実際に
+// 撮れた時刻が乗る。
+func writeSample(track sampleWriter, sample hostmedia.Sample) error {
+	if sample.Gap > 0 {
+		// Data が空のサンプルはパケットを作らず、時計だけを進める
+		if err := track.WriteSample(media.Sample{Duration: sample.Gap}); err != nil {
+			return err
+		}
+	}
+	return track.WriteSample(media.Sample{Data: sample.Data})
 }
 
 func (s *Session) stopMedia() {

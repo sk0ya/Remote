@@ -1,7 +1,7 @@
 package media
 
 import (
-	"bufio"
+	"bytes"
 	"io"
 	"strings"
 	"testing"
@@ -216,33 +216,49 @@ func TestDdagrabStopsDuplicateFrames(t *testing.T) {
 	}
 }
 
+// パイプに溜めさせると、フレームは次のフレームに押し出されて初めて出てくる。
+// dup_frames=0 では次が何分も来ないので、そのあいだ画面が更新されない。
+func TestPipelinesFlushEachFrame(t *testing.T) {
+	opts := Options{W: 1920, H: 1080}.Normalize()
+	for _, p := range pipelines(opts) {
+		args := strings.Join(buildArgs(p, opts), " ")
+		if !strings.Contains(args, "-flush_packets 1") {
+			t.Errorf("%s: フレームごとに押し出していない: %s", p.name, args)
+		}
+	}
+}
+
 // 複製をやめるとフレーム間隔が可変になる。固定値のままRTPタイムスタンプを
 // 進めると、静止するたびに映像の時計が実時間からずれていく。
 func TestPaceKeeperMeasuresRealGaps(t *testing.T) {
 	t0 := time.Unix(0, 0)
-	p := &paceKeeper{nominal: time.Second / 30}
+	p := &paceKeeper{}
 
-	if got := p.next(t0); got != time.Second/30 {
-		t.Errorf("1枚目は前フレームが無いので公称値: %v", got)
+	if got := p.gap(t0); got != 0 {
+		t.Errorf("1枚目は基準が無いので進めない: %v", got)
 	}
-	if got := p.next(t0.Add(100 * time.Millisecond)); got != 100*time.Millisecond {
+	p.sent(t0)
+	if got := p.gap(t0.Add(100 * time.Millisecond)); got != 100*time.Millisecond {
 		t.Errorf("2枚目は実測の間隔になるはず: %v", got)
 	}
-	if got := p.next(t0.Add(2100 * time.Millisecond)); got != 2*time.Second {
+	p.sent(t0.Add(100 * time.Millisecond))
+	if got := p.gap(t0.Add(2100 * time.Millisecond)); got != 2*time.Second {
 		t.Errorf("静止していた2秒がそのまま乗るはず: %v", got)
 	}
 }
 
-// 画面が長時間動かないと間隔がいくらでも伸びる。そのままRTPの時計を飛ばすと
-// 受け側のデコーダが目を回すので、頭打ちにする。逆に0幅のフレームも作らない。
-func TestPaceKeeperClampsExtremes(t *testing.T) {
+// 静止した時間を頭打ちにすると、そのぶんRTPの時計が実時間から遅れ、
+// ずれは静止のたびに積み上がる。受け側はRTPと到着の間隔の差を伝送遅延と
+// みなすので、「回線が数分詰まっている」と申告し続けることになる。
+func TestPaceKeeperKeepsLongIdleIntact(t *testing.T) {
 	t0 := time.Unix(0, 0)
-	p := &paceKeeper{nominal: time.Second / 30}
-	p.next(t0)
-	if got := p.next(t0.Add(time.Hour)); got != maxSampleGap {
-		t.Errorf("長すぎる間隔を頭打ちにしていない: %v", got)
+	p := &paceKeeper{}
+	p.sent(t0)
+
+	if got := p.gap(t0.Add(time.Hour)); got != time.Hour {
+		t.Errorf("長い静止を切り詰めている: %v", got)
 	}
-	if got := p.next(t0.Add(time.Hour)); got != minSampleGap {
+	if got := p.gap(t0); got != minSampleGap {
 		t.Errorf("同時刻のフレームに正の長さを与えていない: %v", got)
 	}
 }
@@ -250,76 +266,78 @@ func TestPaceKeeperClampsExtremes(t *testing.T) {
 // 受け側が詰まって捨てたフレームの時間を失うと、そのぶん映像が早送りになる。
 func TestPaceKeeperCarriesDroppedTime(t *testing.T) {
 	t0 := time.Unix(0, 0)
-	p := &paceKeeper{nominal: time.Second / 30}
-	p.next(t0)
+	p := &paceKeeper{}
+	p.sent(t0)
 
-	d := p.next(t0.Add(100 * time.Millisecond))
-	p.dropped(d) // 送信キューが詰まっていて捨てた
+	p.gap(t0.Add(100 * time.Millisecond)) // 送信キューが詰まっていて捨てた (sentを呼ばない)
 
-	if got := p.next(t0.Add(150 * time.Millisecond)); got != 150*time.Millisecond {
+	if got := p.gap(t0.Add(150 * time.Millisecond)); got != 150*time.Millisecond {
 		t.Errorf("捨てた100msが次に繰り越されていない: %v", got)
 	}
-	if got := p.next(t0.Add(200 * time.Millisecond)); got != 50*time.Millisecond {
+	p.sent(t0.Add(150 * time.Millisecond))
+	if got := p.gap(t0.Add(200 * time.Millisecond)); got != 50*time.Millisecond {
 		t.Errorf("繰り越しを二重に足している: %v", got)
 	}
 }
 
-// アクセスユニットの切れ目は「次のAUのスタートコードが届いたとき」に分かるので、
-// 各フレームの長さはその検出時刻の間隔になる。静止していた時間がそのまま
-// 1枚のフレームの長さとして出てくることを、実際のバイト列で確かめる。
-func TestSampleDurationFollowsArrival(t *testing.T) {
+// アクセスユニットの切れ目は次のAUの先頭が届いて初めて分かる。それを待つと、
+// 画面が止まった瞬間のフレーム (=指を止めたときのカーソル位置) が、次に画面が
+// 動くまで届かない。ホストが黙っても最後の1枚が出てくることを確かめる。
+func TestReadAccessUnitsDeliversLastFrameWhileIdle(t *testing.T) {
 	au := []byte{0, 0, 0, 1, 0x65, 0x88} // IDRスライス (first_mb_in_slice=0)
-	var stream []byte
-	for i := 0; i < 4; i++ {
-		stream = append(stream, au...)
-	}
-	// 各チャンクが「前のAUの残り + 次のAUのスタートコード」で終わるように割る。
-	// こうするとチャンクを読んだ時点で1枚が確定する。
-	clock := time.Unix(0, 0)
-	src := &steppedReader{
-		chunks: [][]byte{stream[0:10], stream[10:16], stream[16:22], stream[22:24]},
-		step: []time.Duration{
-			0, 100 * time.Millisecond, 2 * time.Second, 40 * time.Millisecond,
-		},
-		clock: &clock,
-	}
+	r, w := io.Pipe()
+	defer w.Close()
 	ch := make(chan Sample, 8)
-	opts := Options{FPS: 30}.Normalize()
-	_ = readAccessUnits(bufio.NewReaderSize(src, 64), opts, ch, make(chan struct{}),
-		func() time.Time { return clock })
-	close(ch)
+	go func() { _ = readAccessUnits(r, ch, make(chan struct{}), time.Now) }()
 
-	var got []time.Duration
-	for s := range ch {
-		got = append(got, s.Duration)
+	for i := 0; i < 3; i++ {
+		if _, err := w.Write(au); err != nil {
+			t.Fatalf("書き込み失敗: %v", err)
+		}
 	}
-	want := []time.Duration{time.Second / 30, 2 * time.Second, 40 * time.Millisecond}
-	if len(got) != len(want) {
-		t.Fatalf("フレーム数 %d, want %d (%v)", len(got), len(want), got)
-	}
-	for i := range want {
-		if got[i] != want[i] {
-			t.Errorf("%d枚目の長さ = %v, want %v", i+1, got[i], want[i])
+	// ここで書き込みを止める。ffmpegが黙ったのと同じ状態。
+	for i := 0; i < 3; i++ {
+		select {
+		case s := <-ch:
+			if !bytes.Equal(s.Data, au) {
+				t.Errorf("%d枚目のバイト列が違う: %x", i+1, s.Data)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatalf("%d枚目が届かない (書き込みが止まると出てこない)", i+1)
 		}
 	}
 }
 
-// steppedReader は Read のたびに1チャンク返し、そのぶん時計を進める。
-type steppedReader struct {
-	chunks [][]byte
-	step   []time.Duration
-	clock  *time.Time
-	i      int
-}
+// 1フレームがSPS/PPSと複数NALに分かれていても、まとめて1枚として送る。
+// 途中で切ると、受け側はパラメータセットの無いフレームを受け取ることになる。
+func TestReadAccessUnitsGroupsNALsIntoFrames(t *testing.T) {
+	sps := []byte{0, 0, 0, 1, 0x67, 0x42}
+	pps := []byte{0, 0, 0, 1, 0x68, 0xce}
+	idr := []byte{0, 0, 0, 1, 0x65, 0x88}
+	next := []byte{0, 0, 0, 1, 0x41, 0x9a} // 次フレームのPスライス
 
-func (r *steppedReader) Read(p []byte) (int, error) {
-	if r.i >= len(r.chunks) {
-		return 0, io.EOF
+	r, w := io.Pipe()
+	defer w.Close()
+	ch := make(chan Sample, 8)
+	go func() { _ = readAccessUnits(r, ch, make(chan struct{}), time.Now) }()
+
+	var first []byte
+	first = append(append(append(first, sps...), pps...), idr...)
+	if _, err := w.Write(append(append([]byte(nil), first...), next...)); err != nil {
+		t.Fatalf("書き込み失敗: %v", err)
 	}
-	*r.clock = r.clock.Add(r.step[r.i])
-	n := copy(p, r.chunks[r.i])
-	r.i++
-	return n, nil
+
+	want := [][]byte{first, next}
+	for i, exp := range want {
+		select {
+		case s := <-ch:
+			if !bytes.Equal(s.Data, exp) {
+				t.Errorf("%d枚目 = %x, want %x", i+1, s.Data, exp)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatalf("%d枚目が届かない", i+1)
+		}
+	}
 }
 
 // SDPの profile-level-id は「このストリームをデコードするのに必要な能力」の宣言。
