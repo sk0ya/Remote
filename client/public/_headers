@@ -1,0 +1,11 @@
+# index.html はキャッシュさせない。
+# 資産(assets/)はファイル名にハッシュが付くので、そのまま長く持たせてよいが、
+# 入口のHTMLが古いままだと、新しい資産を指せず古いアプリが動き続ける。
+# iOS Safariはとくにここを掴んだまま離さないことがある。
+/
+  Cache-Control: no-cache
+/index.html
+  Cache-Control: no-cache
+
+/assets/*
+  Cache-Control: public, max-age=31536000, immutable

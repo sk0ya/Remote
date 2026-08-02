@@ -17,10 +17,8 @@ const ICE_SERVERS: RTCIceServer[] = [
 // レイアウトの検証(test/layout.mjs)からも同じものを組み立てるので外に出す。
 export const VIEWER_HTML = `
     <div class="viewer" id="vroot">
-      <div class="stage">
-        <video id="screen" autoplay playsinline muted></video>
-        <div class="surface" id="surface"></div>
-      </div>
+      <video id="screen" autoplay playsinline muted></video>
+      <div class="surface" id="surface"></div>
       <div class="hud">
         <span id="vst" class="status">接続中...</span>
         <span class="hud-btns">

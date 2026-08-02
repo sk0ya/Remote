@@ -87,7 +87,7 @@ Object.assign(window, {
       return {
         visibleHeight: vv.height,
         viewer: rect(vroot),
-        stage: rect(document.querySelector(".stage")),
+        box: { w: video.clientWidth, h: video.clientHeight },
         panel: rect(document.querySelector(".kbd:not(.hidden)")),
         video: rect(video),
         content: contentRect(),

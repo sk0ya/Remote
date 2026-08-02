@@ -92,28 +92,14 @@ input.field {
   color: #f56c6c;
 }
 
-/* スマホのソフトキーボードは画面の下を覆うが、position:fixed の要素は
-   その下に潜ったまま残る。実際に見えている高さ (visualViewport) を
-   --vv-height で受け取り、ビューア全体をそこへ収める。 */
+/* ソフトキーボードで隠れているぶんは、下端(bottom)をJSから上げて避ける
+   (screen.ts)。映像は昔どおりビューアの直下に置く — iOSは映像を包む箱を
+   足すと描画しなくなることがあるので、要素の親子関係は変えない。 */
 .viewer {
   position: fixed;
-  top: 0;
-  left: 0;
-  right: 0;
-  height: var(--vv-height, 100%);
+  inset: 0;
   background: #000;
   display: flex;
-}
-
-/* 映像とタッチ面。特殊キーバー (--kbd-height) のぶんだけ上に詰める。
-   拡大中の映像ははみ出したままにする(切り取ると、端末によっては映像が
-   まるごと描かれなくなる)。バーもHUDもこれより後ろのDOMなので上に載る。 */
-.viewer .stage {
-  position: absolute;
-  left: 0;
-  right: 0;
-  top: 0;
-  bottom: var(--kbd-height, 0px);
 }
 
 .viewer video {
@@ -170,8 +156,8 @@ input.field {
 .viewer .mic {
   position: absolute;
   left: calc(16px + env(safe-area-inset-left, 0));
-  /* キーボードを開いているあいだはバーの上に逃がす (下に隠れて押せなくなる) */
-  bottom: calc(16px + var(--kbd-height, 0px) + env(safe-area-inset-bottom, 0));
+  /* ビューアの下端自体がバーの上まで来るので、ここは素の位置でよい */
+  bottom: calc(16px + env(safe-area-inset-bottom, 0));
   width: 56px;
   height: 56px;
   border-radius: 50%;
@@ -210,11 +196,13 @@ input.field {
 
 /* ソフトキーボードを出すと、映像に使える高さは画面の半分以下しか残らない。
    このパネルはそこからさらに削る側なので、余白も文字も詰めて低く保つ。 */
+/* キーボードの直上に置く。ビューアの中にあるが位置は画面基準 (fixed) で、
+   ビューアの下端が上がってもバーはキーボードに張り付いたまま。 */
 .kbd {
-  position: absolute;
+  position: fixed;
   left: 0;
   right: 0;
-  bottom: 0;
+  bottom: var(--kbd-bottom, 0px);
   background: rgba(17, 19, 24, 0.92);
   padding: 5px 6px calc(5px + env(safe-area-inset-bottom, 0));
   display: flex;

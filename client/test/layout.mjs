@@ -135,7 +135,7 @@ async function run(page, name, width, height) {
   // 1. キーボードを出す前
   const closed = await page.evaluate("JSON.stringify(window.test.measure())").then(JSON.parse);
   near(closed.viewer.h, height, 1, `${name}: ビューアが画面の高さと合っていない`);
-  near(closed.stage.h, height, 1, `${name}: 映像の領域が画面の高さと合っていない`);
+  near(closed.box.h, height, 1, `${name}: 映像の領域が画面の高さと合っていない`);
   ok(
     closed.transform === "none",
     `${name}: 等倍なのにtransformが付いている`,
@@ -154,18 +154,15 @@ async function run(page, name, width, height) {
   const open = await page.evaluate("JSON.stringify(window.test.measure())").then(JSON.parse);
 
   ok(open.panel, `${name}: 特殊キーバーが出ていない`);
-  near(open.viewer.h, visible, 1, `${name}: ビューアがキーボードの下に潜っている`);
+  near(open.viewer.h, visible - open.panel.h, 1, `${name}: ビューアがキーボードの下に潜っている`);
   near(open.panel.bottom, visible, 1, `${name}: バーがキーボードに隠れている`);
-  ok(
-    open.stage.h > 40,
-    `${name}: 映像の領域が潰れている`,
-    `stage=${open.stage.h.toFixed(0)}px`
-  );
+  ok(open.box.h > 40, `${name}: 映像の領域が潰れている`, `${open.box.h.toFixed(0)}px`);
+  near(open.box.h, visible - open.panel.h, 1, `${name}: 映像の領域がバーのぶん詰められていない`);
   ok(!open.micShown, `${name}: 狭い映像の上にマイクボタンが残っている`);
 
   // 映像が見えている範囲に残っているか (真っ黒にならないこと)
   const shownTop = Math.max(open.content.y, 0);
-  const shownBottom = Math.min(open.content.y + open.content.h, open.stage.h);
+  const shownBottom = Math.min(open.content.y + open.content.h, open.box.h);
   ok(
     shownBottom - shownTop > 40,
     `${name}: キーボードを出すと映像が見えなくなる`,
@@ -174,10 +171,10 @@ async function run(page, name, width, height) {
 
   // 見た目の大きさは変えない (収め直して字が読めなくならないこと)
   near(open.content.w, closed.content.w, 1, `${name}: キーボードで映像の大きさが変わった`);
-  if (open.content.h <= open.stage.h + 1) {
+  if (open.content.h <= open.box.h + 1) {
     // まだ収まる場合 (縦持ち)。余白が減って上に寄るだけで、全部見えている。
     ok(
-      open.content.y >= -1 && open.content.y + open.content.h <= open.stage.h + 1,
+      open.content.y >= -1 && open.content.y + open.content.h <= open.box.h + 1,
       `${name}: 収まる大きさなのに映像がはみ出している`
     );
   } else {
@@ -234,12 +231,12 @@ try {
     `バー ${landscape.open.barHeight}px / キー ${landscape.open.keyHeight}px`
   );
   console.log(
-    `縦持ち: パネル ${(portrait.open.viewer.h - portrait.open.stage.h).toFixed(0)}px / ` +
-      `映像に残る高さ ${portrait.open.stage.h.toFixed(0)}px`
+    `縦持ち: パネル ${portrait.open.panel.h.toFixed(0)}px / ` +
+      `映像に残る高さ ${portrait.open.box.h.toFixed(0)}px`
   );
   console.log(
-    `横持ち: パネル ${(landscape.open.viewer.h - landscape.open.stage.h).toFixed(0)}px / ` +
-      `映像に残る高さ ${landscape.open.stage.h.toFixed(0)}px`
+    `横持ち: パネル ${landscape.open.panel.h.toFixed(0)}px / ` +
+      `映像に残る高さ ${landscape.open.box.h.toFixed(0)}px`
   );
 } finally {
   page.close();
