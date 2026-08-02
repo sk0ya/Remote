@@ -7,14 +7,15 @@ import { assertPasskey, ticketMAC, b64uDecode } from "./webauthn";
 import { loadCredId, saveCredId } from "./config";
 import { VoiceInput, voiceSupported } from "./voice";
 import { currentViewport } from "./viewport";
+import { attachScreenLayout } from "./screen";
 
 const ICE_SERVERS: RTCIceServer[] = [
   { urls: "stun:stun.cloudflare.com:3478" },
   { urls: "stun:stun.l.google.com:19302" },
 ];
 
-export function renderViewer(app: HTMLElement, hostId: string, onExit: () => void): void {
-  app.innerHTML = `
+// レイアウトの検証(test/layout.mjs)からも同じものを組み立てるので外に出す。
+export const VIEWER_HTML = `
     <div class="viewer" id="vroot">
       <div class="stage">
         <video id="screen" autoplay playsinline muted></video>
@@ -30,6 +31,9 @@ export function renderViewer(app: HTMLElement, hostId: string, onExit: () => voi
       </div>
       <button class="mic" id="mic" style="display:none">🎤</button>
     </div>`;
+
+export function renderViewer(app: HTMLElement, hostId: string, onExit: () => void): void {
+  app.innerHTML = VIEWER_HTML;
   const video = document.getElementById("screen") as HTMLVideoElement;
   const surface = document.getElementById("surface")!;
   const vroot = document.getElementById("vroot")!;
@@ -81,8 +85,7 @@ export function renderViewer(app: HTMLElement, hostId: string, onExit: () => voi
     clearTimeout(viewTimer);
     document.removeEventListener("visibilitychange", onVisibility);
     window.removeEventListener("resize", onResize);
-    vv?.removeEventListener("resize", relayout);
-    vv?.removeEventListener("scroll", relayout);
+    screen.dispose();
     voice?.dispose();
     voice = null;
     controller?.dispose();
@@ -103,38 +106,19 @@ export function renderViewer(app: HTMLElement, hostId: string, onExit: () => voi
     if (w > 0) controller?.send({ t: "view", w, h });
   };
 
-  // ソフトキーボードが出ているあいだ、実際に見えているのは画面の一部だけになる。
-  // ビューアは position:fixed なので放っておくとキーボードの下に潜ったままで、
-  // 映像も特殊キーバーも隠れたきり動かせない。見えている範囲だけを使うように
-  // 縮め、はみ出した映像は2本指で動かして覗けるようにする(input.ts の refit)。
-  const vv = window.visualViewport;
-  const relayout = () => {
-    if (vv) {
-      vroot.style.setProperty("--vv-top", `${vv.offsetTop}px`);
-      vroot.style.setProperty("--vv-height", `${vv.height}px`);
-    }
-    controller?.relayout();
-  };
-  // キーボードの開閉中は何度も飛んでくるが、遅らせると表示が遅れて追従するので
-  // その都度すぐ反映する(ホストへの送信は伴わないので回数は問題にならない)。
-  vv?.addEventListener("resize", relayout);
-  vv?.addEventListener("scroll", relayout);
-
+  // ソフトキーボードで見えている範囲へビューアを収める配線 (screen.ts)。
+  // はみ出した映像は2本指で動かして覗ける (input.ts の refit)。
+  const screen = attachScreenLayout(vroot, () => controller?.relayout());
   // 特殊キーバーの高さぶん、映像の表示領域を上に詰める。
   // バーは折り返しで高さが変わるので、実測した値を渡してもらう。
-  const onKbdLayout = (height: number) => {
-    vroot.style.setProperty("--kbd-height", `${height}px`);
-    // 開いているあいだは映像に残る高さが僅かなので、重なるものを退ける
-    vroot.classList.toggle("kbd-open", height > 0);
-    relayout();
-  };
+  const onKbdLayout = (height: number) => screen.setKeyboardHeight(height);
 
   // 画面の回転やアドレスバーの伸縮で何度も飛んでくるのでまとめる
   // (送出解像度が変わらない申告ならホスト側でも無視される)。
   const onResize = () => {
     clearTimeout(viewTimer);
     viewTimer = window.setTimeout(sendViewport, 300);
-    relayout();
+    screen.apply();
   };
 
   // バックグラウンドに回った / 画面が消えた。ホストにキャプチャを止めさせ、
@@ -215,7 +199,7 @@ export function renderViewer(app: HTMLElement, hostId: string, onExit: () => voi
       const ctl = controller;
       keyboard?.dispose(); // 再接続で古いキーボードのDOMを残さない
       keyboard = new VirtualKeyboard(vroot, (msg) => ctl.send(msg), onKbdLayout);
-      relayout(); // 新しいcontrollerに今の表示領域を教える
+      screen.apply(); // 新しいcontrollerに今の表示領域を教える
       // 開いた時点で、表示できる大きさを伝えてそこまで落として送ってもらう。
       // ondatachannel の時点ですでに開いていることもある。
       const onReady = () => {

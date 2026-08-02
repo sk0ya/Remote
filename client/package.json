@@ -6,7 +6,9 @@
     "dev": "vite --host",
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview --host",
-    "test": "vitest run"
+    "test": "vitest run && node test/layout.mjs",
+    "test:unit": "vitest run",
+    "test:layout": "node test/layout.mjs"
   },
   "devDependencies": {
     "typescript": "^5.5.0",

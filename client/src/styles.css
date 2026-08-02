@@ -93,11 +93,11 @@ input.field {
 }
 
 /* スマホのソフトキーボードは画面の下を覆うが、position:fixed の要素は
-   その下に潜ったまま残る。実際に見えている範囲 (visualViewport) を
-   --vv-top / --vv-height で受け取り、ビューア全体をそこへ収める。 */
+   その下に潜ったまま残る。実際に見えている高さ (visualViewport) を
+   --vv-height で受け取り、ビューア全体をそこへ収める。 */
 .viewer {
   position: fixed;
-  top: var(--vv-top, 0px);
+  top: 0;
   left: 0;
   right: 0;
   height: var(--vv-height, 100%);
@@ -106,14 +106,14 @@ input.field {
 }
 
 /* 映像とタッチ面。特殊キーバー (--kbd-height) のぶんだけ上に詰める。
-   拡大中の映像がバーの下へはみ出しても、ここで切り取る。 */
+   拡大中の映像ははみ出したままにする(切り取ると、端末によっては映像が
+   まるごと描かれなくなる)。バーもHUDもこれより後ろのDOMなので上に載る。 */
 .viewer .stage {
   position: absolute;
   left: 0;
   right: 0;
   top: 0;
   bottom: var(--kbd-height, 0px);
-  overflow: hidden;
 }
 
 .viewer video {

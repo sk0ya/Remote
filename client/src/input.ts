@@ -204,6 +204,13 @@ export class InputController {
   }
 
   private applyTransform(): void {
+    // 等倍のときはtransformを付けない。付けると映像が合成レイヤーに移り、
+    // 端末によっては(親のクリップと組み合わさって)何も描かれなくなる。
+    // 拡大していないあいだは、transformが無かった頃と同じ素の状態に戻す。
+    if (this.scale === 1 && this.tx === 0 && this.ty === 0) {
+      this.video.style.transform = "";
+      return;
+    }
     this.video.style.transformOrigin = "0 0";
     this.video.style.transform = `translate(${this.tx}px, ${this.ty}px) scale(${this.scale})`;
   }

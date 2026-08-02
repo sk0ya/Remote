@@ -8,3 +8,7 @@ host/remotehost
 *.log
 # capturetestが吐くキャプチャ確認用の生データ
 *.h264
+
+# レイアウト検証が生成する一時ファイル
+client/test/page.js
+client/test/page.html
