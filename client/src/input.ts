@@ -71,6 +71,58 @@ const TAP_MS = 250;
 const LONG_PRESS_MS = 500;
 const MOVE_THRESHOLD = 12; // px
 const SCROLL_PX_PER_NOTCH = 40;
+const MAX_SCALE = 4;
+
+export interface Box {
+  w: number;
+  h: number;
+}
+
+// 拡大時の移動量の上限。映像が表示領域からはみ出したぶんまでしか動かせない。
+// 制限しないと画面外まで放り出せてしまい、真っ黒になって戻し方が分からなくなる。
+export function clampPan(t: number, size: number, scale: number): number {
+  return Math.min(0, Math.max(size * (1 - scale), t));
+}
+
+// object-fit:contain で表示領域に収まるときの倍率。
+function fitScale(box: Box, content: Box): number {
+  if (!(content.w > 0) || !(content.h > 0)) return 0;
+  return Math.min(box.w / content.w, box.h / content.h);
+}
+
+// 表示領域の大きさが変わったときの拡大率と位置。
+//
+// スマホのソフトキーボードが出ると表示領域は半分近くまで狭くなる。そこへ映像を
+// 収め直すと全体は見えるが字が読めなくなるので、映像は今の大きさのまま保ち、
+// 狭くなったぶんは「はみ出した」状態にする。はみ出していれば2本指で動かせるので、
+// 見たいところを覗く窓として使える。キーボードを閉じれば元の倍率に戻る。
+//
+// 位置は、映像が画面上で1ピクセルも動かないように決める。キーボードは下から
+// せり上がって隠しただけ、という見え方になり、隠れたぶんは指で引き上げて見る。
+//
+// 横幅が変わったときは回転かウィンドウの変更で、表示できる範囲そのものが
+// 変わっている。ここで見た目の大きさを保つと、縦持ちにしただけで拡大されて
+// はみ出してしまうので、素直に等倍へ戻す。
+export function refit(
+  prev: Box,
+  next: Box,
+  content: Box,
+  scale: number,
+  tx: number,
+  ty: number
+): { scale: number; tx: number; ty: number } {
+  if (!(next.w > 0) || !(next.h > 0)) return { scale, tx, ty };
+  if (prev.w !== next.w) return { scale: 1, tx: 0, ty: 0 };
+  const f0 = fitScale(prev, content);
+  const f1 = fitScale(next, content);
+  if (!(f0 > 0) || !(f1 > 0)) return { scale, tx, ty };
+  const s = Math.min(MAX_SCALE, Math.max(1, (scale * f0) / f1));
+  // 映像は表示領域の中央に置かれるので、中央のずれぶんだけ位置を戻すと
+  // 画面上の見た目の位置が変わらない。
+  const nx = tx + (scale * prev.w) / 2 - (s * next.w) / 2;
+  const ny = ty + (scale * prev.h) / 2 - (s * next.h) / 2;
+  return { scale: s, tx: clampPan(nx, next.w, s), ty: clampPan(ny, next.h, s) };
+}
 
 export class InputController {
   private pointers = new Map<number, Pt>();
@@ -86,6 +138,9 @@ export class InputController {
   private tx = 0;
   private ty = 0;
 
+  // 直前の表示領域の大きさ。狭くなったときに映像の見え方を保つ基準にする。
+  private box: Box;
+
   private outbox: Outbox;
 
   constructor(
@@ -93,6 +148,7 @@ export class InputController {
     private surface: HTMLElement,
     private dc: RTCDataChannel
   ) {
+    this.box = this.videoBox();
     this.outbox = new Outbox(
       (msg) => this.sendNow(msg),
       (cb) => requestAnimationFrame(cb)
@@ -150,6 +206,26 @@ export class InputController {
   private applyTransform(): void {
     this.video.style.transformOrigin = "0 0";
     this.video.style.transform = `translate(${this.tx}px, ${this.ty}px) scale(${this.scale})`;
+  }
+
+  // transformの影響を受けない、レイアウト上の表示領域。
+  private videoBox(): Box {
+    return { w: this.video.clientWidth, h: this.video.clientHeight };
+  }
+
+  // 表示領域が変わった (キーボードの開閉・画面の回転)。
+  // 映像の見た目の大きさを保ったまま、新しい領域に合わせ直す。
+  relayout(): void {
+    const next = this.videoBox();
+    if (next.w === this.box.w && next.h === this.box.h) return;
+    const prev = this.box;
+    this.box = next;
+    const content = { w: this.video.videoWidth, h: this.video.videoHeight };
+    const r = refit(prev, next, content, this.scale, this.tx, this.ty);
+    this.scale = r.scale;
+    this.tx = r.tx;
+    this.ty = r.ty;
+    this.applyTransform();
   }
 
   private onDown = (e: PointerEvent): void => {
@@ -226,15 +302,17 @@ export class InputController {
 
       if (Math.abs(distDelta) > 30 || this.scale > 1) {
         // ピンチズーム / ズーム中のパン
-        const newScale = Math.min(4, Math.max(1, this.scale * (dist / this.twoFingerStart.dist)));
+        const newScale = Math.min(
+          MAX_SCALE,
+          Math.max(1, this.scale * (dist / this.twoFingerStart.dist))
+        );
         const prevMid = this.twoFingerStart.mid;
         this.tx += mid.x - prevMid.x + (prevMid.x - this.tx) * (1 - newScale / this.scale);
         this.ty += mid.y - prevMid.y + (prevMid.y - this.ty) * (1 - newScale / this.scale);
         this.scale = newScale;
-        if (this.scale === 1) {
-          this.tx = 0;
-          this.ty = 0;
-        }
+        // はみ出したぶんより先へは動かさない (画面外へ放り出して見失わない)
+        this.tx = clampPan(this.tx, this.box.w, this.scale);
+        this.ty = clampPan(this.ty, this.box.h, this.scale);
         this.applyTransform();
         this.twoFingerStart = { mid, dist, time: this.twoFingerStart.time };
       } else {

@@ -92,11 +92,28 @@ input.field {
   color: #f56c6c;
 }
 
+/* スマホのソフトキーボードは画面の下を覆うが、position:fixed の要素は
+   その下に潜ったまま残る。実際に見えている範囲 (visualViewport) を
+   --vv-top / --vv-height で受け取り、ビューア全体をそこへ収める。 */
 .viewer {
   position: fixed;
-  inset: 0;
+  top: var(--vv-top, 0px);
+  left: 0;
+  right: 0;
+  height: var(--vv-height, 100%);
   background: #000;
   display: flex;
+}
+
+/* 映像とタッチ面。特殊キーバー (--kbd-height) のぶんだけ上に詰める。
+   拡大中の映像がバーの下へはみ出しても、ここで切り取る。 */
+.viewer .stage {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 0;
+  bottom: var(--kbd-height, 0px);
+  overflow: hidden;
 }
 
 .viewer video {
@@ -141,12 +158,20 @@ input.field {
   display: none;
 }
 
+/* HUDは映像の上に重なる。横持ちでキーボードを出すと映像に残る高さは
+   100px少々しかないので、その上に載るものは小さく作る。 */
+.viewer .hud button.ghost {
+  font-size: 12px;
+  padding: 5px 10px;
+}
+
 /* 押しっぱなしで喋るボタン。片手で握ったまま親指が届く左下に固定する。
    位置はHUDのステータス表示に影響されない(録音開始で動かない)。 */
 .viewer .mic {
   position: absolute;
   left: calc(16px + env(safe-area-inset-left, 0));
-  bottom: calc(16px + env(safe-area-inset-bottom, 0));
+  /* キーボードを開いているあいだはバーの上に逃がす (下に隠れて押せなくなる) */
+  bottom: calc(16px + var(--kbd-height, 0px) + env(safe-area-inset-bottom, 0));
   width: 56px;
   height: 56px;
   border-radius: 50%;
@@ -169,6 +194,12 @@ input.field {
   border-color: #3b6cf5;
 }
 
+/* キーボードを出しているあいだは打つほうを使っている。56pxの丸は
+   狭くなった映像を隠すだけなので引っ込める(閉じれば戻る)。 */
+.viewer.kbd-open .mic {
+  display: none;
+}
+
 .surface {
   position: absolute;
   inset: 0;
@@ -177,38 +208,41 @@ input.field {
   -webkit-user-select: none;
 }
 
+/* ソフトキーボードを出すと、映像に使える高さは画面の半分以下しか残らない。
+   このパネルはそこからさらに削る側なので、余白も文字も詰めて低く保つ。 */
 .kbd {
   position: absolute;
   left: 0;
   right: 0;
   bottom: 0;
   background: rgba(17, 19, 24, 0.92);
-  padding: 8px 8px calc(8px + env(safe-area-inset-bottom, 0));
+  padding: 5px 6px calc(5px + env(safe-area-inset-bottom, 0));
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 5px;
 }
 
 .kbd.hidden {
   display: none;
 }
 
-/* 横スクロールにすると方向キーが画面外に隠れて気づかれないので、折り返して全部見せる */
+/* 横スクロールにすると方向キーが画面外に隠れて気づかれないので、折り返して全部見せる。
+   1本の列にしてあるので、横持ちなら1段に収まり、縦持ちだけ折り返す。 */
 .kbd-bar {
   display: flex;
   flex-wrap: wrap;
-  gap: 6px;
+  gap: 4px;
 }
 
 .kbd-bar button,
 .kbd-mode {
   appearance: none;
   border: 1px solid #2a3348;
-  border-radius: 8px;
+  border-radius: 6px;
   background: #1a1e27;
   color: #e6e8ee;
-  font-size: 14px;
-  padding: 8px 12px;
+  font-size: 13px;
+  padding: 6px 6px;
   white-space: nowrap;
   cursor: pointer;
   touch-action: manipulation;
@@ -216,9 +250,11 @@ input.field {
   -webkit-user-select: none;
 }
 
+/* 幅は詰めて段数を減らし、余ったぶんは伸ばして指で押せる大きさに戻す。
+   縦持ちで2段・横持ちで1段に収まるところまで詰めてある。 */
 .kbd-bar button {
   flex: 1 0 auto;
-  min-width: 44px;
+  min-width: 34px;
 }
 
 .kbd-bar button.active,
@@ -229,7 +265,7 @@ input.field {
 
 .kbd-row {
   display: flex;
-  gap: 6px;
+  gap: 4px;
   align-items: stretch;
 }
 
@@ -240,11 +276,12 @@ input.field {
 .kbd-field {
   appearance: none;
   border: 1px solid #2a3348;
-  border-radius: 8px;
+  border-radius: 6px;
   background: #1a1e27;
   color: #e6e8ee;
+  /* 16px未満にするとiOSが勝手にページを拡大する。ここだけは詰めない */
   font-size: 16px;
-  padding: 10px 12px;
+  padding: 5px 10px;
   flex: 1 1 auto;
   min-width: 0;
 }

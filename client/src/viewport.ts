@@ -18,11 +18,13 @@ export function viewportPixels(cssW: number, cssH: number, dpr: number): Size {
   return { w: Math.round(cssW * dpr), h: Math.round(cssH * dpr) };
 }
 
-// いま表示に使える大きさ。要素が未レイアウトなら画面全体で代用する。
-export function currentViewport(el?: HTMLElement | null): Size {
+// いま表示に使える大きさ。ビューアは常に画面いっぱいなので画面の大きさで測る。
+//
+// 映像要素の実寸ではなく画面で測るのは、ソフトキーボードで映像の枠が一時的に
+// 狭くなるため。そのたびに申告し直すとホストが解像度を切り替えてしまうが、
+// 映像は見た目の大きさを保ったまま(はみ出して)表示されるので、必要な画素数は
+// キーボードを開く前と変わらない。
+export function currentViewport(): Size {
   const dpr = window.devicePixelRatio || 1;
-  const r = el?.getBoundingClientRect();
-  const w = r?.width || window.innerWidth;
-  const h = r?.height || window.innerHeight;
-  return viewportPixels(w, h, dpr);
+  return viewportPixels(window.innerWidth, window.innerHeight, dpr);
 }

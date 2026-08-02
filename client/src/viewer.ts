@@ -16,8 +16,10 @@ const ICE_SERVERS: RTCIceServer[] = [
 export function renderViewer(app: HTMLElement, hostId: string, onExit: () => void): void {
   app.innerHTML = `
     <div class="viewer" id="vroot">
-      <video id="screen" autoplay playsinline muted></video>
-      <div class="surface" id="surface"></div>
+      <div class="stage">
+        <video id="screen" autoplay playsinline muted></video>
+        <div class="surface" id="surface"></div>
+      </div>
       <div class="hud">
         <span id="vst" class="status">接続中...</span>
         <span class="hud-btns">
@@ -79,6 +81,8 @@ export function renderViewer(app: HTMLElement, hostId: string, onExit: () => voi
     clearTimeout(viewTimer);
     document.removeEventListener("visibilitychange", onVisibility);
     window.removeEventListener("resize", onResize);
+    vv?.removeEventListener("resize", relayout);
+    vv?.removeEventListener("scroll", relayout);
     voice?.dispose();
     voice = null;
     controller?.dispose();
@@ -95,8 +99,34 @@ export function renderViewer(app: HTMLElement, hostId: string, onExit: () => voi
   // ホストへ「実際に表示できる大きさ」を伝える。ホストはこれを上限に縮小して
   // から送るので、スマホは表示に必要なぶんだけデコードすれば済む。
   const sendViewport = () => {
-    const { w, h } = currentViewport(video);
+    const { w, h } = currentViewport();
     if (w > 0) controller?.send({ t: "view", w, h });
+  };
+
+  // ソフトキーボードが出ているあいだ、実際に見えているのは画面の一部だけになる。
+  // ビューアは position:fixed なので放っておくとキーボードの下に潜ったままで、
+  // 映像も特殊キーバーも隠れたきり動かせない。見えている範囲だけを使うように
+  // 縮め、はみ出した映像は2本指で動かして覗けるようにする(input.ts の refit)。
+  const vv = window.visualViewport;
+  const relayout = () => {
+    if (vv) {
+      vroot.style.setProperty("--vv-top", `${vv.offsetTop}px`);
+      vroot.style.setProperty("--vv-height", `${vv.height}px`);
+    }
+    controller?.relayout();
+  };
+  // キーボードの開閉中は何度も飛んでくるが、遅らせると表示が遅れて追従するので
+  // その都度すぐ反映する(ホストへの送信は伴わないので回数は問題にならない)。
+  vv?.addEventListener("resize", relayout);
+  vv?.addEventListener("scroll", relayout);
+
+  // 特殊キーバーの高さぶん、映像の表示領域を上に詰める。
+  // バーは折り返しで高さが変わるので、実測した値を渡してもらう。
+  const onKbdLayout = (height: number) => {
+    vroot.style.setProperty("--kbd-height", `${height}px`);
+    // 開いているあいだは映像に残る高さが僅かなので、重なるものを退ける
+    vroot.classList.toggle("kbd-open", height > 0);
+    relayout();
   };
 
   // 画面の回転やアドレスバーの伸縮で何度も飛んでくるのでまとめる
@@ -104,6 +134,7 @@ export function renderViewer(app: HTMLElement, hostId: string, onExit: () => voi
   const onResize = () => {
     clearTimeout(viewTimer);
     viewTimer = window.setTimeout(sendViewport, 300);
+    relayout();
   };
 
   // バックグラウンドに回った / 画面が消えた。ホストにキャプチャを止めさせ、
@@ -183,7 +214,8 @@ export function renderViewer(app: HTMLElement, hostId: string, onExit: () => voi
       controller = new InputController(video, surface, ev.channel);
       const ctl = controller;
       keyboard?.dispose(); // 再接続で古いキーボードのDOMを残さない
-      keyboard = new VirtualKeyboard(vroot, (msg) => ctl.send(msg));
+      keyboard = new VirtualKeyboard(vroot, (msg) => ctl.send(msg), onKbdLayout);
+      relayout(); // 新しいcontrollerに今の表示領域を教える
       // 開いた時点で、表示できる大きさを伝えてそこまで落として送ってもらう。
       // ondatachannel の時点ですでに開いていることもある。
       const onReady = () => {

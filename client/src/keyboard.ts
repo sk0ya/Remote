@@ -101,8 +101,14 @@ interface BarKey {
   repeat?: boolean; // 押しっぱなしで連射する
 }
 
-// 修飾キーと編集キー
-const ROW1: BarKey[] = [
+// 特殊キー。修飾キー・編集キー・IMEキー・方向キーの順。
+//
+// 以前は2段に分けていたが、段はそれぞれ独立に折り返すので、横持ちでも必ず
+// 2段ぶんの高さを取っていた。ソフトキーボードを出したときに映像へ残る高さは
+// わずかしかないので、1本の列にして端末の幅なりに折り返させる
+// (横持ちなら1段に収まり、そのぶん映像が見える)。
+// PC変換では 空白=変換、方向キー=候補・文節の選択に使う。
+const KEYS: BarKey[] = [
   { label: "Esc", code: "Escape" },
   { label: "Tab", code: "Tab" },
   { label: "Ctrl", code: "ControlLeft", mod: true },
@@ -112,10 +118,6 @@ const ROW1: BarKey[] = [
   { label: "⌫", code: "Backspace", repeat: true },
   { label: "Del", code: "Delete", repeat: true },
   { label: "⏎", code: "Enter" },
-];
-
-// IMEキーと方向キー。PC変換では 空白=変換、方向キー=候補・文節の選択に使う。
-const ROW2: BarKey[] = [
   { label: "半/全", code: "Backquote" },
   { label: "無変換", code: "NonConvert" },
   { label: "変換", code: "Convert" },
@@ -140,15 +142,18 @@ export class VirtualKeyboard {
   private echo = "";
   private repeatDelay = 0;
   private repeatTimer = 0;
+  private observer: ResizeObserver;
 
   constructor(
     container: HTMLElement,
-    private send: Send
+    private send: Send,
+    // バーの高さが変わったことの通知 (映像の表示領域をそのぶん詰めてもらう)。
+    // 開閉だけでなく、折り返しの増減や画面の回転でも高さは変わる。
+    private onLayout: (height: number) => void = () => {}
   ) {
     this.root = document.createElement("div");
     this.root.className = "kbd hidden";
-    this.root.appendChild(this.makeBar(ROW1));
-    this.root.appendChild(this.makeBar(ROW2));
+    this.root.appendChild(this.makeBar(KEYS));
 
     const row = document.createElement("div");
     row.className = "kbd-row";
@@ -188,6 +193,11 @@ export class VirtualKeyboard {
     row.appendChild(this.field);
     this.root.appendChild(row);
     container.appendChild(this.root);
+
+    // 高さは自前の開閉だけでなく折り返しの増減でも変わるので、実測を購読する。
+    // (隠すと display:none で 0 になり、そのまま「バーなし」として伝わる)
+    this.observer = new ResizeObserver(() => this.onLayout(this.root.offsetHeight));
+    this.observer.observe(this.root);
 
     this.applyMode();
   }
@@ -305,9 +315,9 @@ export class VirtualKeyboard {
     // email指定でスマホ側は日本語変換のないASCII配列になり、ローマ字がそのままPCへ届く。
     // url にすると iOS ではスペースキーが "." と "/" に置き換わり、変換キーが押せなくなる。
     this.field.inputMode = this.pcIme ? "email" : "text";
-    this.field.placeholder = this.pcIme
-      ? "ローマ字で入力→PCで変換 (␣で変換・⏎で確定)"
-      : "ここに入力するとPCへ送信";
+    // 説明文はモードボタンと重複するうえ、ソフトキーボードで残った僅かな高さを
+    // 説明のために使うことになる。何を打つ欄かだけ短く出す。
+    this.field.placeholder = this.pcIme ? "ローマ字" : "入力";
   }
 
   toggle(): void {
@@ -324,6 +334,8 @@ export class VirtualKeyboard {
   // 再接続のたびに作り直されるので、古い方のDOMとタイマーは片付ける。
   dispose(): void {
     this.stopRepeat();
+    this.observer.disconnect();
     this.root.remove();
+    this.onLayout(0); // 詰めていたぶんを戻す
   }
 }
