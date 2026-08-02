@@ -78,6 +78,12 @@ export interface Box {
   h: number;
 }
 
+export interface Transform {
+  scale: number;
+  tx: number;
+  ty: number;
+}
+
 // 拡大時の移動量の上限。映像が表示領域からはみ出したぶんまでしか動かせない。
 // 制限しないと画面外まで放り出せてしまい、真っ黒になって戻し方が分からなくなる。
 export function clampPan(t: number, size: number, scale: number): number {
@@ -90,38 +96,30 @@ function fitScale(box: Box, content: Box): number {
   return Math.min(box.w / content.w, box.h / content.h);
 }
 
-// 表示領域の大きさが変わったときの拡大率と位置。
+// 表示領域に対する映像の置き方。
 //
-// スマホのソフトキーボードが出ると表示領域は半分近くまで狭くなる。そこへ映像を
-// 収め直すと全体は見えるが字が読めなくなるので、映像は今の大きさのまま保ち、
-// 狭くなったぶんは「はみ出した」状態にする。はみ出していれば2本指で動かせるので、
-// 見たいところを覗く窓として使える。キーボードを閉じれば元の倍率に戻る。
+// ふだん(fill=false)は全体を収める。デスクトップ全体が見えていないと
+// どこを触っているのか分からないので、これが基本。
 //
-// 位置は、映像が画面上で1ピクセルも動かないように決める。キーボードは下から
-// せり上がって隠しただけ、という見え方になり、隠れたぶんは指で引き上げて見る。
+// ソフトキーボードを出しているあいだ(fill=true)は、残った領域を埋める。
+// 16:9のデスクトップをスマホの縦長の隙間に収め直すと、上下が真っ黒な余白に
+// なったうえ字も読めない大きさになる。埋めてしまえば余白は消え、はみ出した
+// ぶんは2本指で動かして見たいところを出せる。つまみ出せば(縮小すれば)
+// いつでも全体表示に戻せるので、見失うこともない。
 //
-// 横幅が変わったときは回転かウィンドウの変更で、表示できる範囲そのものが
-// 変わっている。ここで見た目の大きさを保つと、縦持ちにしただけで拡大されて
-// はみ出してしまうので、素直に等倍へ戻す。
-export function refit(
-  prev: Box,
-  next: Box,
-  content: Box,
-  scale: number,
-  tx: number,
-  ty: number
-): { scale: number; tx: number; ty: number } {
-  if (!(next.w > 0) || !(next.h > 0)) return { scale, tx, ty };
-  if (prev.w !== next.w) return { scale: 1, tx: 0, ty: 0 };
-  const f0 = fitScale(prev, content);
-  const f1 = fitScale(next, content);
-  if (!(f0 > 0) || !(f1 > 0)) return { scale, tx, ty };
-  const s = Math.min(MAX_SCALE, Math.max(1, (scale * f0) / f1));
-  // 映像は表示領域の中央に置かれるので、中央のずれぶんだけ位置を戻すと
-  // 画面上の見た目の位置が変わらない。
-  const nx = tx + (scale * prev.w) / 2 - (s * next.w) / 2;
-  const ny = ty + (scale * prev.h) / 2 - (s * next.h) / 2;
-  return { scale: s, tx: clampPan(nx, next.w, s), ty: clampPan(ny, next.h, s) };
+// キーボードを閉じれば全体表示へ戻る。
+export function refit(box: Box, content: Box, fill: boolean): Transform {
+  const contain = fitScale(box, content);
+  if (!fill || !(contain > 0)) return { scale: 1, tx: 0, ty: 0 };
+  // 領域を埋める倍率 (収める倍率との比が、そのまま拡大率になる)
+  const cover = Math.max(box.w / content.w, box.h / content.h);
+  const scale = Math.min(MAX_SCALE, Math.max(1, cover / contain));
+  // はみ出したぶんは中央を見せる (端に寄せると必ず片側が切れて見えない)
+  return {
+    scale,
+    tx: clampPan((box.w * (1 - scale)) / 2, box.w, scale),
+    ty: clampPan((box.h * (1 - scale)) / 2, box.h, scale),
+  };
 }
 
 export class InputController {
@@ -138,8 +136,10 @@ export class InputController {
   private tx = 0;
   private ty = 0;
 
-  // 直前の表示領域の大きさ。狭くなったときに映像の見え方を保つ基準にする。
+  // 直前の表示領域の大きさ。変わっていなければ置き直す必要がない。
   private box: Box;
+  // ソフトキーボードで領域が削られている (埋めて表示している) かどうか
+  private filling = false;
 
   private outbox: Outbox;
 
@@ -221,14 +221,17 @@ export class InputController {
   }
 
   // 表示領域が変わった (キーボードの開閉・画面の回転)。
-  // 映像の見た目の大きさを保ったまま、新しい領域に合わせ直す。
-  relayout(): void {
+  // fill = ソフトキーボードで領域が削られている状態。
+  //
+  // ここで置き直すのは領域が変わったときだけ。ユーザーがつまんで動かした
+  // 拡大・位置は、次に領域が変わるまでそのまま残る。
+  relayout(fill: boolean): void {
     const next = this.videoBox();
-    if (next.w === this.box.w && next.h === this.box.h) return;
-    const prev = this.box;
+    if (next.w === this.box.w && next.h === this.box.h && fill === this.filling) return;
     this.box = next;
+    this.filling = fill;
     const content = { w: this.video.videoWidth, h: this.video.videoHeight };
-    const r = refit(prev, next, content, this.scale, this.tx, this.ty);
+    const r = refit(next, content, fill);
     this.scale = r.scale;
     this.tx = r.tx;
     this.ty = r.ty;

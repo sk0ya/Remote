@@ -45,7 +45,7 @@ const controller = new InputController(video, surface, dc);
 const vv = new FakeViewport();
 const screen = attachScreenLayout(
   vroot,
-  () => controller.relayout(),
+  (occluded) => controller.relayout(occluded),
   vv as unknown as VisualViewport
 );
 const kbd = new VirtualKeyboard(vroot, () => {}, (h) => screen.setKeyboardHeight(h));

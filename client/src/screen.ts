@@ -22,7 +22,8 @@ export interface ScreenLayout {
 
 export function attachScreenLayout(
   viewer: HTMLElement,
-  onChanged: () => void,
+  // 領域が削られているか (削られているあいだ、映像は余白を作らず埋める)
+  onChanged: (occluded: boolean) => void,
   vv: VisualViewport | null = window.visualViewport
 ): ScreenLayout {
   let kbdHeight = 0;
@@ -47,7 +48,7 @@ export function attachScreenLayout(
     // (映像の箱にこちらから触れている状態を残さない)。
     const raise = occluded + kbdHeight;
     viewer.style.bottom = raise > 0 ? `${raise}px` : "";
-    onChanged();
+    onChanged(raise > 0);
   };
 
   // キーボードの開閉中は何度も飛んでくるが、遅らせると表示が遅れて追従するので

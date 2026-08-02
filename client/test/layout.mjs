@@ -169,19 +169,20 @@ async function run(page, name, width, height) {
     `見えている高さ ${(shownBottom - shownTop).toFixed(0)}px`
   );
 
-  // 見た目の大きさは変えない (収め直して字が読めなくならないこと)
-  near(open.content.w, closed.content.w, 1, `${name}: キーボードで映像の大きさが変わった`);
-  if (open.content.h <= open.box.h + 1) {
-    // まだ収まる場合 (縦持ち)。余白が減って上に寄るだけで、全部見えている。
-    ok(
-      open.content.y >= -1 && open.content.y + open.content.h <= open.box.h + 1,
-      `${name}: 収まる大きさなのに映像がはみ出している`
-    );
-  } else {
-    // 収まらない場合 (横持ち)。下からせり上がって隠しただけの見え方にする。
-    near(open.content.y, closed.content.y, 1, `${name}: キーボードで映像が飛んだ`);
-    ok(open.transform !== "none", `${name}: はみ出しているのに動かす余地が無い`);
-  }
+  // 残った領域を余白なく使っていること。収め直すと、16:9のデスクトップは
+  // スマホの隙間の中で上下(または左右)が真っ黒になり、字も読めなくなる。
+  ok(
+    open.content.w >= open.box.w * 0.95 && open.content.h >= open.box.h * 0.95,
+    `${name}: キーボードを出すと余白ばかりになる`,
+    `映像 ${open.content.w.toFixed(0)}x${open.content.h.toFixed(0)} / ` +
+      `領域 ${open.box.w.toFixed(0)}x${open.box.h.toFixed(0)}`
+  );
+  // はみ出したぶんは指で動かせること (動かせないと見たいところを出せない)
+  ok(open.transform !== "none", `${name}: 埋めたのに動かす余地が無い`);
+  ok(
+    open.content.w > open.box.w + 1 || open.content.h > open.box.h + 1,
+    `${name}: はみ出しが無い`
+  );
 
   // 3. 閉じたら元通り
   await page.evaluate("window.test.toggleKeyboard()");
@@ -190,7 +191,8 @@ async function run(page, name, width, height) {
   await new Promise((r) => setTimeout(r, 100));
   const back = await page.evaluate("JSON.stringify(window.test.measure())").then(JSON.parse);
   ok(back.transform === "none", `${name}: 閉じても拡大が残る`, back.transform);
-  near(back.content.h, closed.content.h, 1, `${name}: 閉じても元の大きさに戻らない`);
+  near(back.content.h, closed.content.h, 1, `${name}: 閉じても全体表示に戻らない`);
+  near(back.content.w, closed.content.w, 1, `${name}: 閉じても全体表示に戻らない`);
   ok(back.micShown, `${name}: 閉じてもマイクボタンが戻らない`);
 
   return { closed, open };
