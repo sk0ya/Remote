@@ -50,6 +50,14 @@ type app struct {
 	display   int // 表示中のモニタindex (-1=未選択→プライマリ)
 	setStatus func(string)
 
+	// クライアントが申告した表示サイズ(デバイスピクセル)。0なら未申告。
+	// これより大きい解像度を送っても、スマホ側で縮小されて捨てられるだけなので、
+	// 送る前に落としておく。
+	// 書くのはDataChannelゴルーチン(onInput)、読むのは接続要求を捌く
+	// シグナリングゴルーチンなので、必ずロック越しに扱う。
+	viewMu       sync.Mutex
+	viewW, viewH int
+
 	// sessMu は現行セッションと認証待ちセッションの両方を守る。
 	// タイムアウトは別ゴルーチンから触るので、ここは必ずロック越しに扱う。
 	sessMu  sync.Mutex
@@ -391,7 +399,14 @@ func decodeAssertion(m clientMsg) (pair.Assertion, error) {
 // mediaOptions は選択中モニタに合わせたキャプチャ設定を作り、
 // マウス座標のマップ先も同じモニタに合わせる。
 func (a *app) mediaOptions(mons []display.Monitor) media.Options {
-	opts := media.Options{FPS: a.cfg.FPS, BitrateMbps: a.cfg.BitrateMbps}
+	a.viewMu.Lock()
+	vw, vh := a.viewW, a.viewH
+	a.viewMu.Unlock()
+	opts := media.Options{
+		FPS: a.cfg.FPS, BitrateMbps: a.cfg.BitrateMbps,
+		MaxW: vw, MaxH: vh,
+		CapW: a.cfg.MaxWidth, CapH: a.cfg.MaxHeight,
+	}
 	if a.display >= 0 && a.display < len(mons) {
 		mon := mons[a.display]
 		opts.Display = a.display
@@ -411,11 +426,20 @@ func (a *app) onInput(data []byte) {
 		N   int    `json:"n"`
 		S   string `json:"s"`
 		Len int    `json:"len"`
+		On  bool   `json:"on"`
+		W   int    `json:"w"`
+		H   int    `json:"h"`
 	}
 	if err := json.Unmarshal(data, &m); err == nil {
 		switch m.T {
 		case "disp":
 			a.switchDisplay(m.N)
+			return
+		case "vis":
+			a.setActive(m.On)
+			return
+		case "view":
+			a.setViewport(m.W, m.H)
 			return
 		case "aud":
 			a.beginAudio(m.Len)
@@ -545,6 +569,42 @@ func (a *app) sendDisplays() {
 	if err := sess.Send(map[string]any{"t": "displays", "n": n, "cur": a.display}); err != nil {
 		log.Printf("session: displays送信失敗: %v", err)
 	}
+}
+
+// setActive はスマホが前面にあるかどうかの通知を受けてキャプチャを止め/再開する。
+// バックグラウンドに回った相手に送り続ける映像は、誰も見ないまま
+// スマホの無線とデコーダを回すだけなので、まるごと止める。
+func (a *app) setActive(on bool) {
+	if sess := a.session(); sess != nil {
+		sess.SetActive(on)
+	}
+}
+
+// setViewport はクライアントが実際に表示できる大きさを受け取り、
+// それより大きい解像度を送らないようにする。
+func (a *app) setViewport(w, h int) {
+	// 桁違いの値は無視する (上限はどのみち media 側で頭打ちになる)
+	if w <= 0 || h <= 0 || w > 8192 || h > 8192 {
+		return
+	}
+	a.viewMu.Lock()
+	unchanged := w == a.viewW && h == a.viewH
+	if !unchanged {
+		a.viewW, a.viewH = w, h
+	}
+	a.viewMu.Unlock()
+	if unchanged {
+		return
+	}
+	sess := a.session()
+	if sess == nil {
+		return
+	}
+	opts := a.mediaOptions(display.List())
+	ow, oh := opts.EncodedSize()
+	log.Printf("session: クライアント表示サイズ %dx%d → 送出 %dx%d", w, h, ow, oh)
+	// 送出解像度が変わらない申告ならキャプチャは再起動されない (SetMediaOptions側で判断)
+	sess.SetMediaOptions(opts)
 }
 
 func (a *app) switchDisplay(n int) {

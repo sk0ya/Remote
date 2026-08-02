@@ -6,3 +6,5 @@ dist/
 host/remotehost
 .dev.vars
 *.log
+# capturetestが吐くキャプチャ確認用の生データ
+*.h264

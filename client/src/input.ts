@@ -14,6 +14,59 @@ interface Pt {
   y: number;
 }
 
+// Outbox はホストへの操作メッセージをまとめて送る。
+//
+// 以前はpointermoveのたびに1個ずつDataChannelへ送っていた。最近のスマホは
+// 120Hz以上でポインタイベントを出すので、ドラッグやスクロールのあいだ毎秒120個の
+// 個別データグラムを作り、そのたびにJSON化・DTLS暗号化・無線送信が走っていた。
+// 移動は「次の描画フレームまでに来たぶんの最後の1点」だけを送れば十分で、
+// 見た目の追従は変わらないまま送信数が数分の1になる。
+//
+// 押下・離しなどの区切りは即時に送るが、その前に保留中の移動を必ず吐く
+// (追い越すと、押した場所と違うところが押される)。
+export class Outbox {
+  private pending: Pt | null = null;
+  private queued = false;
+  private disposed = false;
+
+  constructor(
+    private raw: (msg: object) => void,
+    private schedule: (cb: () => void) => void
+  ) {}
+
+  // 移動。次のフレームまでまとめられる。
+  move(x: number, y: number): void {
+    if (this.disposed) return;
+    this.pending = { x, y };
+    if (this.queued) return;
+    this.queued = true;
+    this.schedule(() => {
+      this.queued = false;
+      this.flush();
+    });
+  }
+
+  // 即時に送る。保留中の移動があれば先に吐いて順序を保つ。
+  send(msg: object): void {
+    if (this.disposed) return;
+    this.flush();
+    this.raw(msg);
+  }
+
+  private flush(): void {
+    const p = this.pending;
+    if (!p) return;
+    this.pending = null;
+    this.raw({ t: "mv", x: p.x, y: p.y });
+  }
+
+  // 保留中の移動を捨てる。指を離したあとに飛ぶとカーソルがずれる。
+  dispose(): void {
+    this.disposed = true;
+    this.pending = null;
+  }
+}
+
 const TAP_MS = 250;
 const LONG_PRESS_MS = 500;
 const MOVE_THRESHOLD = 12; // px
@@ -33,11 +86,17 @@ export class InputController {
   private tx = 0;
   private ty = 0;
 
+  private outbox: Outbox;
+
   constructor(
     private video: HTMLVideoElement,
     private surface: HTMLElement,
     private dc: RTCDataChannel
   ) {
+    this.outbox = new Outbox(
+      (msg) => this.sendNow(msg),
+      (cb) => requestAnimationFrame(cb)
+    );
     surface.addEventListener("pointerdown", this.onDown);
     surface.addEventListener("pointermove", this.onMove);
     surface.addEventListener("pointerup", this.onUp);
@@ -46,7 +105,12 @@ export class InputController {
     surface.addEventListener("contextmenu", (e) => e.preventDefault());
   }
 
+  // 区切りのある操作 (クリック・ホイール・音声など)。保留中の移動より後になる。
   send(msg: object): void {
+    this.outbox.send(msg);
+  }
+
+  private sendNow(msg: object): void {
     if (this.dc.readyState === "open") this.dc.send(JSON.stringify(msg));
   }
 
@@ -77,9 +141,10 @@ export class InputController {
     return { x, y };
   }
 
+  // 移動は次の描画フレームまでまとめる (1イベント1パケットにしない)。
   private moveTo(clientX: number, clientY: number): void {
     const p = this.toNorm(clientX, clientY);
-    if (p) this.send({ t: "mv", x: p.x, y: p.y });
+    if (p) this.outbox.move(p.x, p.y);
   }
 
   private applyTransform(): void {
@@ -229,4 +294,16 @@ export class InputController {
     e.preventDefault();
     this.send({ t: "wh", dy: -Math.sign(e.deltaY) });
   };
+
+  // 再接続のたびに作り直されるので、古い方の購読は外す。
+  // 残しておくと1回のポインタイベントで捨てるだけの処理が接続回数ぶん走る。
+  dispose(): void {
+    this.outbox.dispose();
+    clearTimeout(this.longPressTimer);
+    this.surface.removeEventListener("pointerdown", this.onDown);
+    this.surface.removeEventListener("pointermove", this.onMove);
+    this.surface.removeEventListener("pointerup", this.onUp);
+    this.surface.removeEventListener("pointercancel", this.onUp);
+    this.surface.removeEventListener("wheel", this.onWheel);
+  }
 }

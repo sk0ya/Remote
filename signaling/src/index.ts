@@ -29,10 +29,23 @@ type Role = "host" | "client";
 interface Attachment {
   role: Role;
   ip: string;
+  // 新しい同ロール接続に蹴られた古いソケット。閉じても「相手が退室した」ではない。
+  replaced?: boolean;
 }
 
+// keepalive。待機中のシグナリングは完全に無通信になるため、経路上のNATや
+// 中継にアイドルとみなされて切られる。この文字列だけは webSocketMessage を
+// 起こさずランタイムが "pong" を返す(ハイバネーションも解除されない)。
+const PING = "ping";
+const PONG = "pong";
+
+// WebSocket.READY_STATE_OPEN 相当。閉じかけのソケットを避けるのに使う。
+const WS_OPEN = 1;
+
 export class Room implements DurableObject {
-  constructor(private state: DurableObjectState) {}
+  constructor(private state: DurableObjectState) {
+    this.state.setWebSocketAutoResponse(new WebSocketRequestResponsePair(PING, PONG));
+  }
 
   async fetch(request: Request): Promise<Response> {
     if (request.headers.get("Upgrade")?.toLowerCase() !== "websocket") {
@@ -42,8 +55,12 @@ export class Room implements DurableObject {
     const role = url.searchParams.get("role") as Role;
     const ip = request.headers.get("CF-Connecting-IP") ?? "";
 
-    // 同一ロールの既存接続は置き換える(host再起動・クライアント再読込対応)
+    // 同一ロールの既存接続は置き換える(host再起動・クライアント再読込対応)。
+    // 印を付けてから閉じる: closeイベントは新しい接続が入室した後に届くことがあり、
+    // そのまま peer-left を流すと繋がったばかりの相手を切断扱いにしてしまう。
     for (const ws of this.state.getWebSockets(role)) {
+      const att = ws.deserializeAttachment() as Attachment | null;
+      if (att) ws.serializeAttachment({ ...att, replaced: true } satisfies Attachment);
       ws.close(4000, "replaced");
     }
 
@@ -52,35 +69,73 @@ export class Room implements DurableObject {
     this.state.acceptWebSocket(serverEnd, [role]);
     serverEnd.serializeAttachment({ role, ip } satisfies Attachment);
 
-    serverEnd.send(
-      JSON.stringify({ type: "hello", ip, peerPresent: this.peer(role) !== null })
-    );
-    this.peer(role)?.send(JSON.stringify({ type: "peer-joined", role, ip }));
+    const peer = this.peer(role);
+    send(serverEnd, { type: "hello", ip, peerPresent: peer !== null });
+    if (peer) send(peer, { type: "peer-joined", role, ip });
 
     return new Response(null, { status: 101, webSocket: clientEnd });
   }
 
+  // そのロールの「生きている」ソケット。蹴った直後の古いソケットは close が
+  // 完了するまで一覧に残るので、置き換え済みと閉じかけを除いて数える。
+  private live(role: Role): WebSocket[] {
+    return this.state.getWebSockets(role).filter((ws) => {
+      const att = ws.deserializeAttachment() as Attachment | null;
+      return !att?.replaced && ws.readyState === WS_OPEN;
+    });
+  }
+
+  // 相手ロールの現在の接続。素朴に先頭を取ると、繋ぎ直したばかりの相手ではなく
+  // 死にかけの方へ送ってしまう(ホストが再接続した直後の接続要求が届かず、
+  // 無反応に見える原因だった)。
   private peer(myRole: Role): WebSocket | null {
-    const others = this.state.getWebSockets(myRole === "host" ? "client" : "host");
-    return others.length > 0 ? others[0] : null;
+    const live = this.live(myRole === "host" ? "client" : "host");
+    // 同着なら新しい方(後から入室した方)を採る
+    return live.length > 0 ? live[live.length - 1] : null;
   }
 
   webSocketMessage(ws: WebSocket, message: string | ArrayBuffer) {
     if (typeof message !== "string" || message.length > MAX_MSG_BYTES) return;
+    // 自動応答が効かない経路(古いクライアント等)から来たpingもここで落とす
+    if (message === PING) {
+      send(ws, PONG);
+      return;
+    }
     const att = ws.deserializeAttachment() as Attachment;
     const peer = this.peer(att.role);
     if (!peer) {
-      ws.send(JSON.stringify({ type: "peer-absent" }));
+      send(ws, { type: "peer-absent" });
       return;
     }
     // msg はJSON文字列のまま素通し。中身の解釈は両端末が行う。
-    peer.send(JSON.stringify({ type: "relay", from: att.role, ip: att.ip, msg: message }));
+    send(peer, { type: "relay", from: att.role, ip: att.ip, msg: message });
   }
 
   webSocketClose(ws: WebSocket) {
+    this.notifyLeft(ws);
+  }
+
+  webSocketError(ws: WebSocket) {
+    this.notifyLeft(ws);
+  }
+
+  // 相手に退室を伝える。ただし置き換えられた古いソケットと、
+  // 同ロールの接続がまだ残っている場合は伝えない(繋がっている側を切らせないため)。
+  private notifyLeft(ws: WebSocket) {
     const att = ws.deserializeAttachment() as Attachment | null;
-    if (att) {
-      this.peer(att.role)?.send(JSON.stringify({ type: "peer-left", role: att.role }));
-    }
+    if (!att || att.replaced) return;
+    if (this.live(att.role).some((other) => other !== ws)) return;
+    const peer = this.peer(att.role);
+    if (peer) send(peer, { type: "peer-left", role: att.role });
+  }
+}
+
+// 閉じかけのソケットへの送信は例外を投げる。ここで throw すると
+// 中継そのものが落ちるので、届かなかったことは黙って受け入れる。
+function send(ws: WebSocket, payload: unknown): void {
+  try {
+    ws.send(typeof payload === "string" ? payload : JSON.stringify(payload));
+  } catch {
+    /* 相手はもう居ない */
   }
 }

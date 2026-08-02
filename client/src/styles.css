@@ -193,13 +193,15 @@ input.field {
   display: none;
 }
 
+/* 横スクロールにすると方向キーが画面外に隠れて気づかれないので、折り返して全部見せる */
 .kbd-bar {
   display: flex;
+  flex-wrap: wrap;
   gap: 6px;
-  overflow-x: auto;
 }
 
-.kbd-bar button {
+.kbd-bar button,
+.kbd-mode {
   appearance: none;
   border: 1px solid #2a3348;
   border-radius: 8px;
@@ -209,11 +211,30 @@ input.field {
   padding: 8px 12px;
   white-space: nowrap;
   cursor: pointer;
+  touch-action: manipulation;
+  user-select: none;
+  -webkit-user-select: none;
 }
 
-.kbd-bar button.active {
+.kbd-bar button {
+  flex: 1 0 auto;
+  min-width: 44px;
+}
+
+.kbd-bar button.active,
+.kbd-mode.active {
   background: #3b6cf5;
   border-color: #3b6cf5;
+}
+
+.kbd-row {
+  display: flex;
+  gap: 6px;
+  align-items: stretch;
+}
+
+.kbd-mode {
+  flex: 0 0 auto;
 }
 
 .kbd-field {
@@ -224,5 +245,6 @@ input.field {
   color: #e6e8ee;
   font-size: 16px;
   padding: 10px 12px;
-  width: 100%;
+  flex: 1 1 auto;
+  min-width: 0;
 }

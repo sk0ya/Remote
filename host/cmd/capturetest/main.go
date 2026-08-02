@@ -7,6 +7,7 @@ import (
 	"log"
 	"time"
 
+	"remotehost/internal/display"
 	"remotehost/internal/media"
 )
 
@@ -14,9 +15,22 @@ func main() {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
+	// 本番と同じ条件で測る。モニタの実解像度を渡さないと縮小が働かず、
+	// 実際に送られるものとは別のパイプラインを診断することになる。
+	opts := media.Options{}
+	mons := display.List()
+	if len(mons) > 0 {
+		m := mons[display.PrimaryIndex(mons)]
+		opts.Display = display.PrimaryIndex(mons)
+		opts.X, opts.Y, opts.W, opts.H = m.X, m.Y, m.W, m.H
+	}
+	opts = opts.Normalize()
+	ow, oh := opts.EncodedSize()
+	log.Printf("キャプチャ %dx%d → 送出 %dx%d @%dfps", opts.W, opts.H, ow, oh, opts.FPS)
+
 	ch := make(chan media.Sample, 8)
 	done := make(chan error, 1)
-	go func() { done <- media.Capture(ctx, media.Options{}, ch) }()
+	go func() { done <- media.Capture(ctx, opts, ch) }()
 
 	var frames, bytes int
 	start := time.Now()

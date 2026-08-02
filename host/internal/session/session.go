@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"strings"
 	"sync"
 	"time"
 
@@ -29,11 +30,36 @@ type Session struct {
 	mediaMu     sync.Mutex
 	cancelMedia context.CancelFunc
 	mediaOpts   hostmedia.Options
-	OnInput     func(data []byte) // DataChannel "input" のテキスト受信 (操作メッセージ)
-	OnBinary    func(data []byte) // 同バイナリ受信 (音声データのチャンク)
-	OnDCOpen    func()            // DataChannelが開いた(ホスト→クライアント送信可能)
-	OnClosed    func()
-	OnState     func(state string)
+	// クライアントが映像を見ているか。スマホがバックグラウンドに回ったり
+	// 画面が消えたりしているあいだは false になり、キャプチャを止める。
+	active   bool
+	OnInput  func(data []byte) // DataChannel "input" のテキスト受信 (操作メッセージ)
+	OnBinary func(data []byte) // 同バイナリ受信 (音声データのチャンク)
+	OnDCOpen func()            // DataChannelが開いた(ホスト→クライアント送信可能)
+	OnClosed func()
+	OnState  func(state string)
+}
+
+// fmtpLine は実際に送るストリームに見合ったSDPのfmtp行を組み立てる。
+// profile-level-id を実態より低く名乗ると、スマホがハードウェアデコーダで
+// 扱えないと判断してソフトウェアデコードに落ち、電池と発熱で跳ね返る。
+func fmtpLine(opts hostmedia.Options) string {
+	opts = opts.Normalize()
+	w, h := opts.EncodedSize()
+	return "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=" +
+		hostmedia.ProfileLevelID(w, h, opts.FPS, opts.BitrateMbps*1000)
+}
+
+// sameCapture は2つの設定が同じffmpegパイプラインになるかを返す。
+// クライアントは向きの変更などのたびに表示サイズを送ってくるが、送出解像度が
+// 変わらないなら再起動する意味はない(そのたびに映像が1秒近く止まる)。
+func sameCapture(a, b hostmedia.Options) bool {
+	a, b = a.Normalize(), b.Normalize()
+	aw, ah := a.EncodedSize()
+	bw, bh := b.EncodedSize()
+	return aw == bw && ah == bh &&
+		a.Display == b.Display && a.X == b.X && a.Y == b.Y && a.W == b.W && a.H == b.H &&
+		a.FPS == b.FPS && a.BitrateMbps == b.BitrateMbps
 }
 
 // New はPeerConnectionを作り、gathering完了済みのoffer SDPを返す。
@@ -42,12 +68,13 @@ func New(ctx context.Context, mediaOpts hostmedia.Options) (*Session, string, er
 	if err != nil {
 		return nil, "", err
 	}
-	s := &Session{pc: pc, mediaOpts: mediaOpts}
+	mediaOpts = mediaOpts.Normalize()
+	s := &Session{pc: pc, mediaOpts: mediaOpts, active: true}
 
 	s.track, err = webrtc.NewTrackLocalStaticSample(
 		webrtc.RTPCodecCapability{
 			MimeType:    webrtc.MimeTypeH264,
-			SDPFmtpLine: "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f",
+			SDPFmtpLine: fmtpLine(mediaOpts),
 		},
 		"video", "remote-screen",
 	)
@@ -93,6 +120,10 @@ func New(ctx context.Context, mediaOpts hostmedia.Options) (*Session, string, er
 			s.startMedia()
 		case webrtc.PeerConnectionStateFailed, webrtc.PeerConnectionStateClosed,
 			webrtc.PeerConnectionStateDisconnected:
+			if state == webrtc.PeerConnectionStateFailed {
+				// ここに来る典型はNAT越えの失敗。原因が外から見えないので明示する。
+				log.Printf("session: P2P確立に失敗 — 双方が厳しいNAT下にあるとSTUNだけでは繋がりません (TURN未対応)")
+			}
 			s.stopMedia()
 			if state != webrtc.PeerConnectionStateDisconnected && s.OnClosed != nil {
 				s.OnClosed()
@@ -119,7 +150,30 @@ func New(ctx context.Context, mediaOpts hostmedia.Options) (*Session, string, er
 		pc.Close()
 		return nil, "", ctx.Err()
 	}
-	return s, pc.LocalDescription().SDP, nil
+	sdp := pc.LocalDescription().SDP
+	logCandidates(sdp)
+	return s, sdp, nil
+}
+
+// logCandidates は集まったICE候補の内訳を残す。別ネットワークから繋がらないとき、
+// 原因が「STUNに届いていない(srflxが0)」なのか「相手側の問題」なのかは
+// ここを見ないと切り分けられない。
+func logCandidates(sdp string) {
+	counts := map[string]int{}
+	for _, line := range strings.Split(sdp, "\n") {
+		i := strings.Index(line, " typ ")
+		if !strings.HasPrefix(strings.TrimSpace(line), "a=candidate:") || i < 0 {
+			continue
+		}
+		fields := strings.Fields(line[i+5:])
+		if len(fields) > 0 {
+			counts[fields[0]]++
+		}
+	}
+	log.Printf("session: ICE候補 host=%d srflx=%d relay=%d", counts["host"], counts["srflx"], counts["relay"])
+	if counts["srflx"] == 0 {
+		log.Printf("session: STUNから応答なし — 同一LAN以外からは繋がりません (ファイアウォールでUDP 3478 が塞がれていないか確認)")
+	}
 }
 
 func (s *Session) HandleAnswer(sdp string) error {
@@ -131,7 +185,8 @@ func (s *Session) HandleAnswer(sdp string) error {
 
 func (s *Session) startMedia() {
 	s.mediaMu.Lock()
-	if s.cancelMedia != nil {
+	// 見ていない相手に送るフレームは、そのぶん丸ごと電力の無駄になる。
+	if s.cancelMedia != nil || !s.active {
 		s.mediaMu.Unlock()
 		return
 	}
@@ -176,12 +231,37 @@ func (s *Session) stopMedia() {
 // (ディスプレイ切り替え用。エンコーダ再起動でSPS/PPSが再送されるため
 // クライアント側デコーダは解像度変更込みで追従できる)
 func (s *Session) SetMediaOptions(opts hostmedia.Options) {
+	opts = opts.Normalize()
 	s.mediaMu.Lock()
+	unchanged := sameCapture(s.mediaOpts, opts)
 	s.mediaOpts = opts
 	running := s.cancelMedia != nil
 	s.mediaMu.Unlock()
-	if running {
+	if running && !unchanged {
 		s.stopMedia()
+		s.startMedia()
+	}
+}
+
+// SetActive はクライアントが映像を見ているかどうかを伝える。
+// スマホがバックグラウンドに回る・画面が消えるあいだ送り続けるフレームは
+// 誰も見ないまま電波とデコーダを回すだけなので、まるごと止める。
+func (s *Session) SetActive(on bool) {
+	s.mediaMu.Lock()
+	if s.active == on {
+		s.mediaMu.Unlock()
+		return
+	}
+	s.active = on
+	s.mediaMu.Unlock()
+
+	if !on {
+		log.Printf("session: クライアントが非表示 — キャプチャ停止")
+		s.stopMedia()
+		return
+	}
+	log.Printf("session: クライアントが復帰 — キャプチャ再開")
+	if s.pc.ConnectionState() == webrtc.PeerConnectionStateConnected {
 		s.startMedia()
 	}
 }

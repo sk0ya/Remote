@@ -20,11 +20,16 @@ type Config struct {
 	ClientURL string `json:"clientUrl"` // スマホ用WebアプリのURL(QRに埋め込む)
 	// 登録パスキーの資格情報ID と 公開鍵(SPKI DER)。どちらもbase64url。
 	// 秘密情報ではないので、漏れても他端末が接続できるようにはならない。
-	CredentialID  string          `json:"credentialId"`
-	CredentialKey string          `json:"credentialKey"`
-	ClientOrigins []string        `json:"clientOrigins"` // WebAuthnで受け付けるクライアントのオリジン
-	BitrateMbps   int             `json:"bitrateMbps"`   // 映像ビットレート (既定4)
-	FPS           int             `json:"fps"`           // フレームレート (既定30)
+	CredentialID  string   `json:"credentialId"`
+	CredentialKey string   `json:"credentialKey"`
+	ClientOrigins []string `json:"clientOrigins"` // WebAuthnで受け付けるクライアントのオリジン
+	BitrateMbps   int      `json:"bitrateMbps"`   // 映像ビットレート (既定4)
+	FPS           int      `json:"fps"`           // フレームレート (既定30)
+	// 送出解像度の上限 (既定 1280x720)。モニタの実解像度をそのまま送ると
+	// スマホは表示に必要な数倍のデコードを回すことになり、電池を大きく減らす。
+	// 大きい画面で見るなど、電力より精細さを取りたいときだけ上げる。
+	MaxWidth      int             `json:"maxWidth"`
+	MaxHeight     int             `json:"maxHeight"`
 	VoiceCommands []voice.Command `json:"voiceCommands"` // 音声コマンド定義 (未指定ならvoice.Defaults())
 	STTCommand    string          `json:"sttCommand"`    // 音声認識エンジン(jvi-serve)の実行ファイル
 	STTDir        string          `json:"sttDir"`        // その作業ディレクトリ (config.tomlとmodels/がある場所)

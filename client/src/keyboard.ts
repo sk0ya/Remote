@@ -1,30 +1,145 @@
-// 仮想キーボード: 非表示inputでスマホのIME入力を受けてテキスト送信し、
-// 特殊キーバーで修飾キー・編集キーを送る。
+// 仮想キーボード: 非表示inputでスマホの入力を受けてホストへ送り、
+// 特殊キーバーで修飾キー・編集キー・IMEキーを送る。
+//
+// 変換をどちらでやるかを2モードで切り替える:
+//   スマホ変換 … スマホのIMEで確定した文字列を txt (Unicode直接入力) で送る。
+//                打鍵がPCに届かないので、PCの予測変換・学習・単語登録は効かない。
+//   PC変換     … 打鍵をスキャンコードのまま送り、PC側のIMEに変換させる。
+//                候補ウィンドウはPCの画面に出るので、映像を見ながら変換できる。
+//                スマホ側のIMEは邪魔になるので inputmode でASCII配列にする。
+
+import { loadPcIme, savePcIme } from "./config";
 
 type Send = (msg: object) => void;
 
 const MODIFIERS = ["ControlLeft", "AltLeft", "ShiftLeft", "MetaLeft"] as const;
 
-const BAR_KEYS: Array<{ label: string; code: string; mod?: boolean }> = [
+export interface Stroke {
+  code: string;
+  shift: boolean;
+}
+
+// 記号はキーボード配列で位置が変わる。ここに置くのはJISでもUSでも同じ位置の
+// ものだけで、@ や " のようにずれるものは打鍵にせずUnicode入力に逃がす。
+const PUNCT: Record<string, string> = {
+  " ": "Space",
+  "-": "Minus",
+  ",": "Comma",
+  ".": "Period",
+  "/": "Slash",
+  ";": "Semicolon",
+};
+
+// 1文字を打鍵に落とす。打鍵で表せない文字はnull。
+export function charStroke(ch: string): Stroke | null {
+  if (ch >= "a" && ch <= "z") return { code: `Key${ch.toUpperCase()}`, shift: false };
+  if (ch >= "A" && ch <= "Z") return { code: `Key${ch}`, shift: true };
+  if (ch >= "0" && ch <= "9") return { code: `Digit${ch}`, shift: false };
+  const code = PUNCT[ch];
+  return code ? { code, shift: false } : null;
+}
+
+function tap(code: string): object[] {
+  return [
+    { t: "key", code, down: true },
+    { t: "key", code, down: false },
+  ];
+}
+
+// 文字列をPCへの打鍵メッセージ列にする。
+// 打鍵にできない文字(かな・絵文字・配列依存の記号)は続くぶんをまとめて txt で送る。
+export function textMessages(s: string): object[] {
+  const out: object[] = [];
+  let raw = "";
+  const flushRaw = (): void => {
+    if (raw) {
+      out.push({ t: "txt", s: raw });
+      raw = "";
+    }
+  };
+  for (const ch of s) {
+    const st = charStroke(ch);
+    if (!st) {
+      raw += ch;
+      continue;
+    }
+    flushRaw();
+    if (st.shift) {
+      out.push(
+        { t: "key", code: "ShiftLeft", down: true },
+        ...tap(st.code),
+        { t: "key", code: "ShiftLeft", down: false }
+      );
+    } else {
+      out.push(...tap(st.code));
+    }
+  }
+  flushRaw();
+  return out;
+}
+
+// 打ち間違いの取り消しで大量のBackspaceが飛ばないよう上限を設ける。
+// (入力欄を全選択して消した、といった操作でPC側の別の文字まで消さないため)
+const MAX_BACKSPACE = 32;
+
+// 入力欄の変化をPCへの打鍵に直す。共通の先頭はそのまま、消えたぶんはBackspaceにする。
+// 途中にカーソルを戻して編集した場合は先頭一致がそこで切れるので、
+// 「そこから後ろを打ち直す」ぶんの打鍵になる。PC側の見た目とは合う。
+export function editMessages(prev: string, next: string): object[] {
+  let i = 0;
+  while (i < prev.length && i < next.length && prev[i] === next[i]) i++;
+  const back = Math.min(prev.length - i, MAX_BACKSPACE);
+  const out: object[] = [];
+  for (let n = 0; n < back; n++) out.push(...tap("Backspace"));
+  return out.concat(textMessages(next.slice(i)));
+}
+
+interface BarKey {
+  label: string;
+  code: string;
+  mod?: boolean;
+  repeat?: boolean; // 押しっぱなしで連射する
+}
+
+// 修飾キーと編集キー
+const ROW1: BarKey[] = [
   { label: "Esc", code: "Escape" },
   { label: "Tab", code: "Tab" },
   { label: "Ctrl", code: "ControlLeft", mod: true },
   { label: "Alt", code: "AltLeft", mod: true },
   { label: "Shift", code: "ShiftLeft", mod: true },
   { label: "Win", code: "MetaLeft", mod: true },
-  { label: "↑", code: "ArrowUp" },
-  { label: "↓", code: "ArrowDown" },
-  { label: "←", code: "ArrowLeft" },
-  { label: "→", code: "ArrowRight" },
-  { label: "Del", code: "Delete" },
+  { label: "⌫", code: "Backspace", repeat: true },
+  { label: "Del", code: "Delete", repeat: true },
   { label: "⏎", code: "Enter" },
 ];
+
+// IMEキーと方向キー。PC変換では 空白=変換、方向キー=候補・文節の選択に使う。
+const ROW2: BarKey[] = [
+  { label: "半/全", code: "Backquote" },
+  { label: "無変換", code: "NonConvert" },
+  { label: "変換", code: "Convert" },
+  { label: "␣", code: "Space", repeat: true },
+  { label: "←", code: "ArrowLeft", repeat: true },
+  { label: "↑", code: "ArrowUp", repeat: true },
+  { label: "↓", code: "ArrowDown", repeat: true },
+  { label: "→", code: "ArrowRight", repeat: true },
+];
+
+const REPEAT_DELAY_MS = 400;
+const REPEAT_INTERVAL_MS = 60;
 
 export class VirtualKeyboard {
   private root: HTMLElement;
   private field: HTMLInputElement;
+  private modeBtn: HTMLButtonElement;
   private sticky = new Set<string>();
   private stickyButtons = new Map<string, HTMLButtonElement>();
+  private pcIme = loadPcIme();
+  // PC変換のとき、入力欄の直前の内容。ここからの差分を打鍵にする。
+  private echo = "";
+  private repeatDelay = 0;
+  private repeatTimer = 0;
 
   constructor(
     container: HTMLElement,
@@ -32,41 +147,36 @@ export class VirtualKeyboard {
   ) {
     this.root = document.createElement("div");
     this.root.className = "kbd hidden";
+    this.root.appendChild(this.makeBar(ROW1));
+    this.root.appendChild(this.makeBar(ROW2));
 
-    const bar = document.createElement("div");
-    bar.className = "kbd-bar";
-    for (const k of BAR_KEYS) {
-      const btn = document.createElement("button");
-      btn.textContent = k.label;
-      btn.addEventListener("pointerdown", (e) => {
-        e.preventDefault(); // フォーカスを奪わない
-        if (k.mod) {
-          this.toggleModifier(k.code, btn);
-        } else {
-          this.tapKey(k.code);
-        }
-      });
-      if (k.mod) this.stickyButtons.set(k.code, btn);
-      bar.appendChild(btn);
-    }
-    this.root.appendChild(bar);
+    const row = document.createElement("div");
+    row.className = "kbd-row";
+
+    this.modeBtn = document.createElement("button");
+    this.modeBtn.className = "kbd-mode";
+    this.modeBtn.addEventListener("pointerdown", (e) => {
+      e.preventDefault(); // フォーカスを奪わない
+      this.setPcIme(!this.pcIme);
+    });
+    row.appendChild(this.modeBtn);
 
     this.field = document.createElement("input");
     this.field.className = "kbd-field";
     this.field.type = "text";
-    this.field.placeholder = "ここに入力するとPCへ送信";
     this.field.autocomplete = "off";
     this.field.autocapitalize = "off";
     (this.field as HTMLInputElement & { spellcheck: boolean }).spellcheck = false;
 
     // IME確定文字・直接入力をまとめて送る
     this.field.addEventListener("input", (e) => {
-      if ((e as InputEvent).isComposing) return; // IME変換中は確定まで待つ
+      if ((e as InputEvent).isComposing) return; // スマホIMEの変換中は確定まで待つ
       this.flushField();
     });
     this.field.addEventListener("compositionend", () => this.flushField());
     this.field.addEventListener("keydown", (e) => {
       if (e.isComposing) return;
+      // 入力欄が空だと消す文字がなくinputイベントが来ないので、ここで拾う
       if (e.key === "Backspace" && this.field.value === "") {
         this.tapKey("Backspace");
       } else if (e.key === "Enter") {
@@ -75,11 +185,62 @@ export class VirtualKeyboard {
         this.tapKey("Enter");
       }
     });
-    this.root.appendChild(this.field);
+    row.appendChild(this.field);
+    this.root.appendChild(row);
     container.appendChild(this.root);
+
+    this.applyMode();
+  }
+
+  private makeBar(keys: BarKey[]): HTMLElement {
+    const bar = document.createElement("div");
+    bar.className = "kbd-bar";
+    for (const k of keys) {
+      const btn = document.createElement("button");
+      btn.textContent = k.label;
+      btn.addEventListener("pointerdown", (e) => {
+        e.preventDefault(); // フォーカスを奪わない
+        if (k.mod) {
+          this.toggleModifier(k.code, btn);
+        } else {
+          this.pressKey(k);
+        }
+      });
+      if (k.repeat) {
+        for (const ev of ["pointerup", "pointercancel", "pointerleave"]) {
+          btn.addEventListener(ev, () => this.stopRepeat());
+        }
+      }
+      if (k.mod) this.stickyButtons.set(k.code, btn);
+      bar.appendChild(btn);
+    }
+    return bar;
+  }
+
+  private pressKey(k: BarKey): void {
+    this.tapKey(k.code);
+    if (!k.repeat) return;
+    this.stopRepeat();
+    this.repeatDelay = window.setTimeout(() => {
+      this.repeatTimer = window.setInterval(() => this.tapKey(k.code), REPEAT_INTERVAL_MS);
+    }, REPEAT_DELAY_MS);
+  }
+
+  private stopRepeat(): void {
+    clearTimeout(this.repeatDelay);
+    clearInterval(this.repeatTimer);
+    this.repeatDelay = 0;
+    this.repeatTimer = 0;
   }
 
   private flushField(): void {
+    if (this.pcIme) {
+      const text = this.field.value;
+      for (const msg of editMessages(this.echo, text)) this.send(msg);
+      this.echo = text;
+      this.releaseSticky();
+      return;
+    }
     const text = this.field.value;
     if (text) {
       this.send({ t: "txt", s: text });
@@ -89,9 +250,18 @@ export class VirtualKeyboard {
   }
 
   private tapKey(code: string): void {
+    this.flushField(); // 未送信の文字を追い越さない
     this.send({ t: "key", code, down: true });
     this.send({ t: "key", code, down: false });
     this.releaseSticky();
+    // 変換・確定・カーソル移動のあとはPC側の状態が入力欄と食い違う。
+    // 差分の基準を捨てて、ここから打ち直しとして扱う。
+    this.clearEcho();
+  }
+
+  private clearEcho(): void {
+    this.field.value = "";
+    this.echo = "";
   }
 
   private toggleModifier(code: string, btn: HTMLButtonElement): void {
@@ -117,6 +287,29 @@ export class VirtualKeyboard {
     }
   }
 
+  private setPcIme(on: boolean): void {
+    this.pcIme = on;
+    savePcIme(on);
+    this.applyMode();
+    // inputmodeの変更はフォーカスし直さないとソフトキーボードに反映されない
+    if (document.activeElement === this.field) {
+      this.field.blur();
+      this.field.focus();
+    }
+  }
+
+  private applyMode(): void {
+    this.clearEcho();
+    this.modeBtn.textContent = this.pcIme ? "PC変換" : "スマホ変換";
+    this.modeBtn.classList.toggle("active", this.pcIme);
+    // email指定でスマホ側は日本語変換のないASCII配列になり、ローマ字がそのままPCへ届く。
+    // url にすると iOS ではスペースキーが "." と "/" に置き換わり、変換キーが押せなくなる。
+    this.field.inputMode = this.pcIme ? "email" : "text";
+    this.field.placeholder = this.pcIme
+      ? "ローマ字で入力→PCで変換 (␣で変換・⏎で確定)"
+      : "ここに入力するとPCへ送信";
+  }
+
   toggle(): void {
     const hidden = this.root.classList.toggle("hidden");
     if (!hidden) {
@@ -124,6 +317,13 @@ export class VirtualKeyboard {
     } else {
       this.field.blur();
       this.releaseSticky();
+      this.clearEcho();
     }
+  }
+
+  // 再接続のたびに作り直されるので、古い方のDOMとタイマーは片付ける。
+  dispose(): void {
+    this.stopRepeat();
+    this.root.remove();
   }
 }

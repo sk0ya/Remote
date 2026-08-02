@@ -6,6 +6,7 @@ import { VirtualKeyboard } from "./keyboard";
 import { assertPasskey, ticketMAC, b64uDecode } from "./webauthn";
 import { loadCredId, saveCredId } from "./config";
 import { VoiceInput, voiceSupported } from "./voice";
+import { currentViewport } from "./viewport";
 
 const ICE_SERVERS: RTCIceServer[] = [
   { urls: "stun:stun.cloudflare.com:3478" },
@@ -36,7 +37,13 @@ export function renderViewer(app: HTMLElement, hostId: string, onExit: () => voi
   let pc: RTCPeerConnection | null = null;
   let keyboard: VirtualKeyboard | null = null;
   let voice: VoiceInput | null = null;
+  let controller: InputController | null = null;
   let exited = false;
+  // スマホがバックグラウンドに回っている / 画面が消えている。
+  // このあいだに動くものはすべて誰にも見えないまま電池を減らすだけなので、
+  // 映像もkeepaliveも再接続も止める。
+  let hidden = false;
+  let viewTimer = 0;
   let retryTimer = 0;
   let toastTimer = 0;
   let retries = 0; // 連続した自動再接続の回数 (接続成功でリセット)
@@ -48,6 +55,9 @@ export function renderViewer(app: HTMLElement, hostId: string, onExit: () => voi
   // 撃つと、1回の切断で認証ダイアログが何枚も開いてしまうため1本に絞る。
   let connecting = false;
   let connectTimer = 0;
+  // シグナリング(WebSocket)自体の再接続。接続成功でリセットする。
+  let signalRetries = 0;
+  let signalTimer = 0;
   // ホストから受け取る再接続チケット。これがあるあいだは生体認証を省ける。
   // メモリだけに置き、localStorageには書かない(タブを閉じれば消える)。
   let ticket: string | null = null;
@@ -64,9 +74,15 @@ export function renderViewer(app: HTMLElement, hostId: string, onExit: () => voi
     exited = true;
     clearTimeout(retryTimer);
     clearTimeout(connectTimer);
+    clearTimeout(signalTimer);
     clearTimeout(toastTimer);
+    clearTimeout(viewTimer);
+    document.removeEventListener("visibilitychange", onVisibility);
+    window.removeEventListener("resize", onResize);
     voice?.dispose();
     voice = null;
+    controller?.dispose();
+    controller = null;
     pc?.close();
     pc = null;
     ch.close();
@@ -76,12 +92,56 @@ export function renderViewer(app: HTMLElement, hostId: string, onExit: () => voi
     onExit();
   });
 
+  // ホストへ「実際に表示できる大きさ」を伝える。ホストはこれを上限に縮小して
+  // から送るので、スマホは表示に必要なぶんだけデコードすれば済む。
+  const sendViewport = () => {
+    const { w, h } = currentViewport(video);
+    if (w > 0) controller?.send({ t: "view", w, h });
+  };
+
+  // 画面の回転やアドレスバーの伸縮で何度も飛んでくるのでまとめる
+  // (送出解像度が変わらない申告ならホスト側でも無視される)。
+  const onResize = () => {
+    clearTimeout(viewTimer);
+    viewTimer = window.setTimeout(sendViewport, 300);
+  };
+
+  // バックグラウンドに回った / 画面が消えた。ホストにキャプチャを止めさせ、
+  // keepaliveも止める。復帰したら送り直して繋ぎ直す。
+  function onVisibility(): void {
+    if (exited) return;
+    const nowHidden = document.hidden;
+    if (nowHidden === hidden) return;
+    hidden = nowHidden;
+    ch.setActive(!hidden);
+
+    if (hidden) {
+      controller?.send({ t: "vis", on: false });
+      // 見えないところで再接続を試しても、認証ダイアログが溜まるだけ
+      clearTimeout(retryTimer);
+      clearTimeout(signalTimer);
+      return;
+    }
+
+    controller?.send({ t: "vis", on: true });
+    sendViewport();
+    // 隠れているあいだに切れていたら、ここで繋ぎ直す
+    if (!ch.open) {
+      signalRetries = 0;
+      ch.connect();
+    } else if (pc?.connectionState !== "connected") {
+      requestConnect();
+    }
+  }
+
   // 切断・失敗時は少し待って自動で接続し直す。
   // 接続のたびにパスキーの認証ダイアログが出るので自動リトライは回数を絞り、
   // それ以降はタップで明示的にやり直してもらう(ダイアログが延々と出るのを避ける)。
   const maxAutoRetries = 3;
   const scheduleRetry = (delayMs: number) => {
-    if (exited || halted) return;
+    // 見えていないあいだの再接続は、誰も見ない映像のために電池を使うだけ。
+    // 復帰時に onVisibility が繋ぎ直す。
+    if (exited || halted || hidden) return;
     clearTimeout(retryTimer);
     if (retries >= maxAutoRetries) {
       setStatus("再接続できませんでした — タップして再試行", true);
@@ -119,8 +179,19 @@ export function renderViewer(app: HTMLElement, hostId: string, onExit: () => voi
     };
     pc.ondatachannel = (ev) => {
       if (ev.channel.label !== "input") return;
-      const controller = new InputController(video, surface, ev.channel);
-      keyboard = new VirtualKeyboard(vroot, (msg) => controller.send(msg));
+      controller?.dispose(); // 再接続時に古い購読を残さない
+      controller = new InputController(video, surface, ev.channel);
+      const ctl = controller;
+      keyboard?.dispose(); // 再接続で古いキーボードのDOMを残さない
+      keyboard = new VirtualKeyboard(vroot, (msg) => ctl.send(msg));
+      // 開いた時点で、表示できる大きさを伝えてそこまで落として送ってもらう。
+      // ondatachannel の時点ですでに開いていることもある。
+      const onReady = () => {
+        sendViewport();
+        if (hidden) ctl.send({ t: "vis", on: false });
+      };
+      if (ev.channel.readyState === "open") onReady();
+      else ev.channel.onopen = onReady;
       // onclick代入で再接続時の重複登録を防ぐ (addEventListenerだと2回目以降トグルが打ち消し合う)
       (document.getElementById("kbd-toggle") as HTMLButtonElement).onclick = () => keyboard?.toggle();
       // 音声入力 (対応ブラウザのみ。ボタンのハンドラはプロパティ代入なので再接続でも重複しない)
@@ -129,9 +200,9 @@ export function renderViewer(app: HTMLElement, hostId: string, onExit: () => voi
         voice?.dispose();
         voice = new VoiceInput(
           micBtn,
-          (msg) => controller.send(msg),
-          (buf) => controller.sendBinary(buf),
-          () => controller.buffered,
+          (msg) => ctl.send(msg),
+          (buf) => ctl.sendBinary(buf),
+          () => ctl.buffered,
           setStatus
         );
       }
@@ -165,7 +236,7 @@ export function renderViewer(app: HTMLElement, hostId: string, onExit: () => voi
       };
       // 切替ボタン: 次のディスプレイへ巡回 (onclick代入で再接続時の重複登録を防ぐ)
       dispBtn.onclick = () => {
-        if (dispCount > 1) controller.send({ t: "disp", n: (dispCur + 1) % dispCount });
+        if (dispCount > 1) ctl.send({ t: "disp", n: (dispCur + 1) % dispCount });
       };
     };
     pc.onconnectionstatechange = () => {
@@ -247,20 +318,35 @@ export function renderViewer(app: HTMLElement, hostId: string, onExit: () => voi
     halted = true;
     endAttempt();
     clearTimeout(retryTimer);
+    clearTimeout(signalTimer);
     setStatus(text, true);
     ch.close();
   };
 
   const ch = new SignalChannel(hostId, {
     onOpen: (_ip, peerPresent) => {
+      signalRetries = 0;
       if (peerPresent) {
         requestConnect();
       } else {
+        // ホストが入室したら onPeerJoined で自動的に繋ぎに行く
+        endAttempt();
         setStatus("ホストがオフラインです。待機中...", true);
       }
     },
     onPeerJoined: () => requestConnect(),
-    onPeerLeft: () => setStatus("ホストが切断しました", true),
+    // ホスト側のシグナリングは再接続を繰り返すので、退室=あきらめ ではない。
+    // 進行中の要求だけ畳んでおき、戻ってきた瞬間(onPeerJoined)に繋ぎ直す。
+    // ここで畳まないと、次の入室時に「要求が進行中」と見なされて素通りしてしまう。
+    onPeerLeft: () => {
+      endAttempt();
+      setStatus("ホストが切断しました。復帰を待っています...", true);
+    },
+    // 要求を出した時点でホストが部屋に居なかった。応答は来ないので待たない。
+    onPeerAbsent: () => {
+      endAttempt();
+      setStatus("ホストがオフラインです。待機中...", true);
+    },
     onMessage: (msg) => {
       const m = msg as { t: string; sdp?: string; nonce?: string; reason?: string };
       if (m.t === "offer" && m.sdp && m.nonce) {
@@ -298,12 +384,20 @@ export function renderViewer(app: HTMLElement, hostId: string, onExit: () => voi
       // ソケットが死んだ時点で交渉中の要求は無効。次の試行を塞がないよう畳む。
       endAttempt();
       if (exited || halted) return;
+      // 見えていないあいだは繋ぎ直さない。復帰した時点で onVisibility が繋ぎ直す。
+      if (hidden) return;
+      // 最初の1回はすぐ繋ぎ直す(一瞬の瞬断が大半)。落ち続けるようなら間隔を空ける。
+      const delay = Math.min(1000 * 2 ** signalRetries, 15_000);
+      signalRetries++;
       setStatus(`シグナリング切断: ${reason} — 再接続します...`, true);
-      window.setTimeout(() => {
-        if (!exited && !halted) ch.connect();
-      }, 3000);
+      clearTimeout(signalTimer);
+      signalTimer = window.setTimeout(() => {
+        if (!exited && !halted && !hidden) ch.connect();
+      }, delay);
     },
   });
+  document.addEventListener("visibilitychange", onVisibility);
+  window.addEventListener("resize", onResize);
   ch.connect();
 }
 
