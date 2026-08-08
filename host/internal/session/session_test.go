@@ -144,3 +144,32 @@ func TestSameCaptureIgnoresHarmlessChanges(t *testing.T) {
 		t.Errorf("fpsが変わるのに再起動しないと判定された")
 	}
 }
+
+func TestSummarizeCandidatesSeparatesIPFamilies(t *testing.T) {
+	sdp := "a=candidate:1 1 udp 1 192.168.0.2 5000 typ host\r\n" +
+		"a=candidate:2 1 udp 1 2001:db8::1 5001 typ host\r\n" +
+		"a=candidate:3 1 udp 1 pc.local 5002 typ host\r\n" +
+		"a=candidate:4 1 udp 1 203.0.113.8 5003 typ srflx raddr 192.168.0.2 rport 5000\r\n"
+	got := summarizeCandidates(sdp)
+	if got.count("host", "v4") != 1 || got.count("host", "v6") != 1 || got.count("host", "name") != 1 {
+		t.Fatalf("host候補の分類が不正: %#v", got.counts)
+	}
+	if got.count("srflx", "v4") != 1 || !got.publicV4 {
+		t.Fatalf("srflx IPv4候補の分類が不正: %#v", got)
+	}
+}
+
+func TestDiagnoseICEFailure(t *testing.T) {
+	from := func(sdp string) candidateSummary { return summarizeCandidates(sdp) }
+	v4 := "a=candidate:1 1 udp 1 203.0.113.8 5000 typ srflx\r\n"
+	v6 := "a=candidate:1 1 udp 1 2001:db8::8 5000 typ host\r\n"
+	if got := diagnoseICEFailure(from(v4), candidateSummary{}); !strings.Contains(got, "クライアント") {
+		t.Errorf("相手候補なしの診断 = %q", got)
+	}
+	if got := diagnoseICEFailure(from(v4), from(v6)); !strings.Contains(got, "共通IP方式") {
+		t.Errorf("IP方式不一致の診断 = %q", got)
+	}
+	if got := diagnoseICEFailure(from(v4), from(v4)); !strings.Contains(got, "NAT/ファイアウォール") {
+		t.Errorf("同一IP方式での疎通失敗診断 = %q", got)
+	}
+}

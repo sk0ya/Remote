@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"net"
 	"strings"
 	"sync"
 	"time"
@@ -32,12 +33,14 @@ type Session struct {
 	mediaOpts   hostmedia.Options
 	// クライアントが映像を見ているか。スマホがバックグラウンドに回ったり
 	// 画面が消えたりしているあいだは false になり、キャプチャを止める。
-	active   bool
-	OnInput  func(data []byte) // DataChannel "input" のテキスト受信 (操作メッセージ)
-	OnBinary func(data []byte) // 同バイナリ受信 (音声データのチャンク)
-	OnDCOpen func()            // DataChannelが開いた(ホスト→クライアント送信可能)
-	OnClosed func()
-	OnState  func(state string)
+	active    bool
+	OnInput   func(data []byte) // DataChannel "input" のテキスト受信 (操作メッセージ)
+	OnBinary  func(data []byte) // 同バイナリ受信 (音声データのチャンク)
+	OnDCOpen  func()            // DataChannelが開いた(ホスト→クライアント送信可能)
+	OnClosed  func()
+	OnState   func(state string)
+	localICE  candidateSummary
+	remoteICE candidateSummary
 }
 
 // fmtpLine は実際に送るストリームに見合ったSDPのfmtp行を組み立てる。
@@ -117,12 +120,12 @@ func New(ctx context.Context, mediaOpts hostmedia.Options) (*Session, string, er
 		}
 		switch state {
 		case webrtc.PeerConnectionStateConnected:
+			s.logSelectedPair()
 			s.startMedia()
 		case webrtc.PeerConnectionStateFailed, webrtc.PeerConnectionStateClosed,
 			webrtc.PeerConnectionStateDisconnected:
 			if state == webrtc.PeerConnectionStateFailed {
-				// ここに来る典型はNAT越えの失敗。原因が外から見えないので明示する。
-				log.Printf("session: P2P確立に失敗 — 双方が厳しいNAT下にあるとSTUNだけでは繋がりません (TURN未対応)")
+				log.Printf("session: P2P確立に失敗 — %s", diagnoseICEFailure(s.localICE, s.remoteICE))
 			}
 			s.stopMedia()
 			if state != webrtc.PeerConnectionStateDisconnected && s.OnClosed != nil {
@@ -151,36 +154,100 @@ func New(ctx context.Context, mediaOpts hostmedia.Options) (*Session, string, er
 		return nil, "", ctx.Err()
 	}
 	sdp := pc.LocalDescription().SDP
-	logCandidates(sdp)
+	s.localICE = logCandidates("ホスト", sdp)
 	return s, sdp, nil
 }
 
-// logCandidates は集まったICE候補の内訳を残す。別ネットワークから繋がらないとき、
-// 原因が「STUNに届いていない(srflxが0)」なのか「相手側の問題」なのかは
-// ここを見ないと切り分けられない。
-func logCandidates(sdp string) {
-	counts := map[string]int{}
+type candidateSummary struct {
+	counts   map[string]map[string]int
+	publicV4 bool
+	publicV6 bool
+	total    int
+	relay    int
+}
+
+func summarizeCandidates(sdp string) candidateSummary {
+	s := candidateSummary{counts: map[string]map[string]int{}}
 	for _, line := range strings.Split(sdp, "\n") {
-		i := strings.Index(line, " typ ")
-		if !strings.HasPrefix(strings.TrimSpace(line), "a=candidate:") || i < 0 {
+		fields := strings.Fields(strings.TrimSpace(line))
+		if len(fields) < 8 || !strings.HasPrefix(fields[0], "a=candidate:") || fields[6] != "typ" {
 			continue
 		}
-		fields := strings.Fields(line[i+5:])
-		if len(fields) > 0 {
-			counts[fields[0]]++
+		typ, address := fields[7], fields[4]
+		family := "name"
+		if ip := net.ParseIP(address); ip != nil {
+			if ip.To4() != nil {
+				family = "v4"
+			} else {
+				family = "v6"
+			}
+			// srflx/relay は外部から見える候補。host はグローバルアドレスだけを
+			// 到達可能と数え、LAN内・リンクローカルを誤診断に使わない。
+			public := typ == "srflx" || typ == "relay" ||
+				(typ == "host" && ip.IsGlobalUnicast() && !ip.IsPrivate())
+			if public && family == "v4" {
+				s.publicV4 = true
+			}
+			if public && family == "v6" {
+				s.publicV6 = true
+			}
+		}
+		if s.counts[typ] == nil {
+			s.counts[typ] = map[string]int{}
+		}
+		s.counts[typ][family]++
+		s.total++
+		if typ == "relay" {
+			s.relay++
 		}
 	}
-	log.Printf("session: ICE候補 host=%d srflx=%d relay=%d", counts["host"], counts["srflx"], counts["relay"])
-	if counts["srflx"] == 0 {
-		log.Printf("session: STUNから応答なし — 同一LAN以外からは繋がりません (ファイアウォールでUDP 3478 が塞がれていないか確認)")
+	return s
+}
+
+func (s candidateSummary) count(typ, family string) int { return s.counts[typ][family] }
+
+func logCandidates(side, sdp string) candidateSummary {
+	s := summarizeCandidates(sdp)
+	log.Printf("session: ICE候補(%s) host[v4=%d v6=%d name=%d] srflx[v4=%d v6=%d] relay=%d",
+		side, s.count("host", "v4"), s.count("host", "v6"), s.count("host", "name"),
+		s.count("srflx", "v4"), s.count("srflx", "v6"), s.relay)
+	return s
+}
+
+func diagnoseICEFailure(local, remote candidateSummary) string {
+	if remote.total == 0 {
+		return "クライアントからICE候補を受信できませんでした"
 	}
+	if local.total == 0 {
+		return "ホストでICE候補を収集できませんでした"
+	}
+	if !(local.publicV4 && remote.publicV4) && !(local.publicV6 && remote.publicV6) {
+		return "双方から到達可能な共通IP方式がありません (IPv4/IPv6の不一致、またはSTUN失敗)"
+	}
+	if local.relay == 0 && remote.relay == 0 {
+		return "候補は交換できましたがUDPがNAT/ファイアウォールを越えられませんでした (TURN候補なし)"
+	}
+	return "ICE候補間の疎通に失敗しました (回線またはファイアウォールを確認)"
 }
 
 func (s *Session) HandleAnswer(sdp string) error {
+	s.remoteICE = logCandidates("クライアント", sdp)
 	return s.pc.SetRemoteDescription(webrtc.SessionDescription{
 		Type: webrtc.SDPTypeAnswer,
 		SDP:  sdp,
 	})
+}
+
+func (s *Session) logSelectedPair() {
+	transport := s.pc.SCTP().Transport().ICETransport()
+	pair, err := transport.GetSelectedCandidatePair()
+	if err != nil || pair == nil {
+		log.Printf("session: 選択ICE経路を取得できません: %v", err)
+		return
+	}
+	log.Printf("session: 選択ICE経路 %s/%s:%d(%s) <-> %s/%s:%d(%s)",
+		pair.Local.Protocol, pair.Local.Address, pair.Local.Port, pair.Local.Typ,
+		pair.Remote.Protocol, pair.Remote.Address, pair.Remote.Port, pair.Remote.Typ)
 }
 
 func (s *Session) startMedia() {
