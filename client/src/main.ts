@@ -2,6 +2,7 @@ import { loadHostId, saveHostId, clearHostId, saveCredId } from "./config";
 import { SignalChannel } from "./signal";
 import { renderViewer } from "./viewer";
 import { registerPasskey, recoverHostId, webauthnSupported } from "./webauthn";
+import { PROTOCOL_VERSION } from "./protocol";
 
 const app = document.getElementById("app")!;
 
@@ -97,12 +98,12 @@ function renderPair(hostId: string, code: string): void {
       onOpen: (_ip, peerPresent) => {
         if (!peerPresent) {
           fail("PCのアプリが起動していません。", ch);
-        } else if (!ch.send({ t: "pair", code, password })) {
+        } else if (!ch.send({ t: "pair", v: PROTOCOL_VERSION, code, password })) {
           fail(REPLACED_MSG, ch);
         }
       },
       onMessage: (msg) => {
-        const m = msg as { t: string; reason?: string; reg?: string };
+        const m = msg as { t: string; reason?: string; reg?: string; expected?: number };
         if (m.t === "pair-ok") {
           // コード検証を通った。ここでパスキーを作り、公開鍵だけをホストへ渡す。
           // reg はホストが発行した合言葉で、そのまま返して登録要求の出所を示す。
@@ -129,7 +130,11 @@ function renderPair(hostId: string, code: string): void {
           location.hash = "";
           route();
         } else if (m.t === "pair-err") {
-          fail(PAIR_ERRORS[m.reason ?? "unknown"] ?? PAIR_ERRORS.unknown, ch);
+          if (m.reason === "protocol") {
+            fail(`PC側とのバージョンが一致しません (必要: v${m.expected ?? "?"})。`, ch);
+          } else {
+            fail(PAIR_ERRORS[m.reason ?? "unknown"] ?? PAIR_ERRORS.unknown, ch);
+          }
         }
       },
       onClose: (reason) => {

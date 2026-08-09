@@ -8,6 +8,7 @@ import { loadCredId, saveCredId } from "./config";
 import { VoiceInput, voiceSupported } from "./voice";
 import { currentViewport } from "./viewport";
 import { attachScreenLayout } from "./screen";
+import { PROTOCOL_VERSION } from "./protocol";
 
 const ICE_SERVERS: RTCIceServer[] = [
   { urls: "stun:stun.cloudflare.com:3478" },
@@ -65,6 +66,9 @@ export function renderViewer(app: HTMLElement, hostId: string, onExit: () => voi
   // ホストから受け取る再接続チケット。これがあるあいだは生体認証を省ける。
   // メモリだけに置き、localStorageには書かない(タブを閉じれば消える)。
   let ticket: string | null = null;
+  // 今のP2P経路が確立した後にだけ実行する認証処理。
+  let authenticateCurrent: (() => Promise<void>) | null = null;
+  let authenticating = false;
   // ホストのディスプレイ数と表示中index (ホストからの "displays" 通知で更新)
   let dispCount = 1;
   let dispCur = 0;
@@ -184,8 +188,14 @@ export function renderViewer(app: HTMLElement, hostId: string, onExit: () => voi
     toastTimer = window.setTimeout(() => setStatus(""), 2500);
   };
 
-  async function handleOffer(sdp: string, nonce: string): Promise<void> {
+  async function handleOffer(sdp: string, nonce: string, version: number): Promise<void> {
+    if (version !== PROTOCOL_VERSION) {
+      halt(`PC側とのバージョンが一致しません (PC: v${version || "?"} / この端末: v${PROTOCOL_VERSION})。`);
+      return;
+    }
     pc?.close();
+    authenticateCurrent = null;
+    authenticating = false;
     pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
     pc.ontrack = (ev) => {
       video.srcObject = ev.streams[0] ?? new MediaStream([ev.track]);
@@ -257,9 +267,8 @@ export function renderViewer(app: HTMLElement, hostId: string, onExit: () => voi
       if (!pc) return;
       switch (pc.connectionState) {
         case "connected":
-          retries = 0;
-          endAttempt();
-          setStatus("");
+          setStatus("P2P接続確認済み — 認証します...");
+          beginAuthentication();
           break;
         case "connecting":
           setStatus("P2P接続中...");
@@ -281,25 +290,40 @@ export function renderViewer(app: HTMLElement, hostId: string, onExit: () => voi
     await waitIceComplete(pc);
     const answerSDP = pc.localDescription!.sdp;
 
-    // ホストのnonceとoffer/answerを束ねたチャレンジに署名する。
-    // これがホスト側の認証そのものであり、同時にSDPの改ざん検出も兼ねる
-    // (中継サーバーがどちらかを書き換えていれば、ホストでの再計算と一致しない)。
-    // 有効なチケットがあればHMACで済ませ、生体認証のダイアログを出さない。
-    let auth: Record<string, string>;
-    if (ticket) {
-      setStatus("再接続中...");
-      auth = { mac: await ticketMAC(ticket, b64uDecode(nonce), sdp, answerSDP) };
-    } else {
-      setStatus("パスキーで認証中...");
-      const assertion = await assertPasskey(b64uDecode(nonce), sdp, answerSDP, loadCredId());
-      saveCredId(assertion.credId); // 次回から allowCredentials で名指しする
-      auth = { ...assertion };
-    }
-    if (!ch.send({ t: "answer", sdp: answerSDP, ...auth })) {
+    // まずanswerだけを渡してP2P経路を確認する。ホストはこの段階では映像を送らず、
+    // DataChannelの入力も捨てる。connectionState=connected になってから下の認証を行う。
+    authenticateCurrent = async () => {
+      let auth: Record<string, string>;
+      if (ticket) {
+        setStatus("再接続を認証中...");
+        auth = { mac: await ticketMAC(ticket, b64uDecode(nonce), sdp, answerSDP) };
+      } else {
+        setStatus("パスキーで認証中...");
+        const assertion = await assertPasskey(b64uDecode(nonce), sdp, answerSDP, loadCredId());
+        saveCredId(assertion.credId);
+        auth = { ...assertion };
+      }
+      if (!ch.send({ t: "auth", v: PROTOCOL_VERSION, ...auth })) {
+        throw new Error("接続が別のタブに奪われました");
+      }
+      setStatus("認証確認待ち...");
+    };
+    if (!ch.send({ t: "answer", v: PROTOCOL_VERSION, sdp: answerSDP })) {
       throw new Error("接続が別のタブに奪われました");
     }
-    setStatus("answer送信、P2P確立待ち...");
+    setStatus("P2P経路を確認中...");
   }
+
+  const beginAuthentication = () => {
+    if (authenticating || !authenticateCurrent) return;
+    authenticating = true;
+    authenticateCurrent().catch((e) => {
+      pc?.close();
+      endAttempt();
+      setStatus(`接続に失敗しました: ${e}`, true);
+      scheduleRetry(3000);
+    });
+  };
 
   const requestConnect = () => {
     if (halted || connecting) return;
@@ -307,7 +331,7 @@ export function renderViewer(app: HTMLElement, hostId: string, onExit: () => voi
     // (再ネゴシエーションは映像の途切れと、チケットが無ければ認証ダイアログを招く)。
     if (pc?.connectionState === "connected") return;
     setStatus("ホストへ接続要求...");
-    if (!ch.send({ t: "connect" })) {
+    if (!ch.send({ t: "connect", v: PROTOCOL_VERSION })) {
       // 部屋を奪われている。onCloseで繋ぎ直すので、ここでは知らせるだけ。
       setStatus("接続が別のタブに奪われました", true);
       return;
@@ -362,17 +386,37 @@ export function renderViewer(app: HTMLElement, hostId: string, onExit: () => voi
       setStatus("ホストがオフラインです。待機中...", true);
     },
     onMessage: (msg) => {
-      const m = msg as { t: string; sdp?: string; nonce?: string; reason?: string };
+      const m = msg as {
+        t: string;
+        v?: number;
+        sdp?: string;
+        nonce?: string;
+        reason?: string;
+        expected?: number;
+      };
       if (m.t === "offer" && m.sdp && m.nonce) {
         // 認証ダイアログを閉じられた場合もここに来る。放っておくと復帰手段が
         // なくなるので、通常の失敗と同じ再接続の流れに乗せる。
-        handleOffer(m.sdp, m.nonce).catch((e) => {
+        handleOffer(m.sdp, m.nonce, m.v ?? 0).catch((e) => {
           endAttempt();
           setStatus(`接続に失敗しました: ${e}`, true);
           scheduleRetry(3000);
         });
+      } else if (m.t === "ready-auth") {
+        beginAuthentication();
+      } else if (m.t === "auth-ok") {
+        retries = 0;
+        endAttempt();
+        // DataChannelは認証前に開くため、その時点で送った初期状態はホスト側で
+        // 意図的に破棄される。解禁直後に現在値を送り直し、送出解像度と
+        // バックグラウンド時のキャプチャ停止を確実に反映する。
+        sendViewport();
+        if (hidden) controller?.send({ t: "vis", on: false });
+        setStatus("");
       } else if (m.t === "error") {
-        if (m.reason === "auth") {
+        if (m.reason === "protocol") {
+          halt(`PC側とのバージョンが一致しません (必要: v${m.expected ?? "?"})。`);
+        } else if (m.reason === "auth") {
           endAttempt();
           if (ticket) {
             // チケットの期限切れ。パスキーからやり直せば通る

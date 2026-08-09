@@ -25,6 +25,7 @@ import (
 
 type clientMsg struct {
 	T        string `json:"t"`
+	Version  int    `json:"v,omitempty"`
 	SDP      string `json:"sdp,omitempty"`
 	Code     string `json:"code,omitempty"`
 	Password string `json:"password,omitempty"`
@@ -62,7 +63,7 @@ type app struct {
 	// タイムアウトは別ゴルーチンから触るので、ここは必ずロック越しに扱う。
 	sessMu  sync.Mutex
 	sess    *session.Session // 認証済みの現行セッション
-	pending *pendingAuth     // offer送信済み・assertion付きanswer待ち
+	pending *pendingAuth     // offer送信済み・P2P確認または認証待ち
 	authGen uint64           // 仮セッションの世代カウンタ
 
 	// クライアントから分割送信される音声の組み立て中バッファ
@@ -75,18 +76,23 @@ type app struct {
 // 認証を通るまで現行セッションには昇格させないので、hostIdを知るだけの第三者が
 // connectを撃っても、操作中のセッションは切れない。
 type pendingAuth struct {
-	sess  *session.Session
-	nonce []byte
-	offer string
-	gen   uint64 // 世代番号。タイムアウトが古い世代を巻き添えにしないための目印
-	timer *time.Timer
+	sess   *session.Session
+	nonce  []byte
+	offer  string
+	answer string // P2P疎通確認に適用済みのanswer。認証チャレンジにもこの値を使う。
+	gen    uint64 // 世代番号。タイムアウトが古い世代を巻き添えにしないための目印
+	timer  *time.Timer
 }
 
 // 1発話あたりの音声データの上限 (opusなら数十KB程度。桁違いのものは捨てる)
 const maxAudioBytes = 4 << 20
 
-// offerを送ってから認証付きanswerが返ってくるまでの猶予。
-// クライアント側はICE収集(最大5秒)のあとに生体認証ダイアログ(最大60秒)を挟むので、
+// クライアントとホスト間のメッセージ仕様。互換性のない片側更新を
+// 認証失敗や無応答として扱わず、更新が必要だと明示する。
+const protocolVersion = 1
+
+// offerを送ってからP2P確認と認証が終わるまでの猶予。
+// クライアント側はICE収集(最大5秒)、P2P確立、生体認証(最大60秒)を順に行うので、
 // その合計より確実に長く取る。短いとホストだけが先に諦めて無反応に見える。
 // 超えたら仮セッションを畳む(放置された場合や、hostIDを知る第三者の空打ち対策)。
 // なお映像のキャプチャはP2P確立後にしか始まらないため、認証前に掴む資源はPeerConnectionだけ。
@@ -194,6 +200,18 @@ func (a *app) takeAuth() *pendingAuth {
 	return p
 }
 
+// recordAnswer は認証前のP2P疎通確認用answerを一度だけ記録する。
+func (a *app) recordAnswer(sdp string) *pendingAuth {
+	a.sessMu.Lock()
+	defer a.sessMu.Unlock()
+	p := a.pending
+	if p == nil || p.answer != "" {
+		return nil
+	}
+	p.answer = sdp
+	return p
+}
+
 // promote は認証を通った仮セッションを現行セッションに昇格させ、古い方を畳む。
 func (a *app) promote(s *session.Session) {
 	a.sessMu.Lock()
@@ -254,6 +272,10 @@ func (a *app) onMessage(msg json.RawMessage, peerIP string) {
 		a.client.Send(map[string]any{"t": "pong", "time": time.Now().Format(time.RFC3339)})
 
 	case "pair":
+		if m.Version != protocolVersion {
+			a.client.Send(map[string]any{"t": "pair-err", "reason": "protocol", "expected": protocolVersion})
+			return
+		}
 		// コード/パスワード/ネットワークの検証まで。実際の登録はこの後の pair-key。
 		regToken, err := a.pm.Handle(m.Code, m.Password, peerIP, a.hostIP)
 		if err != nil {
@@ -291,6 +313,11 @@ func (a *app) onMessage(msg json.RawMessage, peerIP string) {
 		a.client.Send(map[string]any{"t": "pair-done"})
 
 	case "connect":
+		if m.Version != protocolVersion {
+			log.Printf("session: 非対応プロトコル v%d (必要 v%d)", m.Version, protocolVersion)
+			a.client.Send(map[string]any{"t": "error", "reason": "protocol", "expected": protocolVersion})
+			return
+		}
 		if !a.pm.Paired() {
 			log.Printf("session: 端末未登録のまま接続要求")
 			a.client.Send(map[string]any{"t": "error", "reason": "unpaired"})
@@ -323,7 +350,8 @@ func (a *app) onMessage(msg json.RawMessage, peerIP string) {
 		}
 		s.OnState = func(state string) {
 			if state == "connected" {
-				a.setStatus("接続中 (リモート操作中)")
+				a.client.Send(map[string]any{"t": "ready-auth"})
+				a.setStatus("接続確認済み (認証待ち)")
 			}
 		}
 		// nonceはこの接続限り。クライアントはこれとoffer/answerからチャレンジを作り、
@@ -331,30 +359,55 @@ func (a *app) onMessage(msg json.RawMessage, peerIP string) {
 		nonce := pair.Nonce()
 		a.beginAuth(s, nonce, sdp)
 		a.client.Send(map[string]any{
-			"t": "offer", "sdp": sdp,
+			"t": "offer", "v": protocolVersion, "sdp": sdp,
 			"nonce": base64.RawURLEncoding.EncodeToString(nonce),
 		})
 		log.Printf("session: offer送信 (認証待ち)")
 
 	case "answer":
-		p := a.takeAuth()
-		if p == nil {
-			log.Printf("session: 認証待ちでないanswer — 破棄")
+		if m.Version != protocolVersion {
+			a.client.Send(map[string]any{"t": "error", "reason": "protocol", "expected": protocolVersion})
 			return
 		}
-		// 認証が通らない限りSDPは適用せず、現行セッションにも昇格させない。
-		// 中継サーバーがSDPを書き換えていればチャレンジが食い違うので、ここで落ちる。
+		p := a.recordAnswer(m.SDP)
+		if p == nil {
+			log.Printf("session: 接続確認待ちでないanswer — 破棄")
+			return
+		}
+		if err := p.sess.HandleAnswer(m.SDP); err != nil {
+			log.Printf("session: answer適用失敗: %v", err)
+			p.sess.Close()
+			return
+		}
+		log.Printf("session: answer適用 — P2P疎通確認待ち")
+
+	case "auth":
+		if m.Version != protocolVersion {
+			a.client.Send(map[string]any{"t": "error", "reason": "protocol", "expected": protocolVersion})
+			return
+		}
+		p := a.takeAuth()
+		if p == nil || p.answer == "" {
+			log.Printf("session: 接続確認前の認証 — 破棄")
+			if p != nil {
+				p.sess.Close()
+			}
+			return
+		}
+		// P2P経路は確認済みだが、認証が通るまでは映像・入力を解禁せず、
+		// 現行セッションにも昇格させない。SDPが書き換えられていれば
+		// チャレンジが食い違うので、ここで落ちる。
 		// MACがあれば再接続チケット、無ければパスキーのassertionで検証する。
 		// どちらも対象は同じ Challenge(nonce, offer, answer)。
 		var err error
 		if m.MAC != "" {
-			if !a.pm.VerifyTicketMAC(p.nonce, p.offer, m.SDP, m.MAC) {
+			if !a.pm.VerifyTicketMAC(p.nonce, p.offer, p.answer, m.MAC) {
 				err = errors.New("再接続チケットが無効または期限切れ")
 			}
 		} else {
 			var as pair.Assertion
 			if as, err = decodeAssertion(m); err == nil {
-				err = a.pm.VerifyAssertion(p.nonce, p.offer, m.SDP, as)
+				err = a.pm.VerifyAssertion(p.nonce, p.offer, p.answer, as)
 			}
 		}
 		if err != nil {
@@ -364,16 +417,14 @@ func (a *app) onMessage(msg json.RawMessage, peerIP string) {
 			a.client.Send(map[string]any{"t": "error", "reason": "auth"})
 			return
 		}
-		if err := p.sess.HandleAnswer(m.SDP); err != nil {
-			log.Printf("session: answer適用失敗: %v", err)
-			p.sess.Close()
-			return
-		}
 		a.promote(p.sess)
+		p.sess.Authorize()
+		a.client.Send(map[string]any{"t": "auth-ok"})
+		a.setStatus("接続中 (リモート操作中)")
 		if m.MAC != "" {
-			log.Printf("session: 認証OK (再接続チケット) — answer適用")
+			log.Printf("session: 認証OK (再接続チケット) — 映像・入力を解禁")
 		} else {
-			log.Printf("session: 認証OK (パスキー) — answer適用")
+			log.Printf("session: 認証OK (パスキー) — 映像・入力を解禁")
 		}
 	}
 }

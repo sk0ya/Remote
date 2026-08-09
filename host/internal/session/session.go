@@ -31,6 +31,9 @@ type Session struct {
 	mediaMu     sync.Mutex
 	cancelMedia context.CancelFunc
 	mediaOpts   hostmedia.Options
+	authMu      sync.Mutex
+	authorized  bool
+	dcOpened    bool
 	// クライアントが映像を見ているか。スマホがバックグラウンドに回ったり
 	// 画面が消えたりしているあいだは false になり、キャプチャを止める。
 	active    bool
@@ -97,11 +100,21 @@ func New(ctx context.Context, mediaOpts hostmedia.Options) (*Session, string, er
 	}
 	s.dc = dc
 	dc.OnOpen(func() {
-		if s.OnDCOpen != nil {
+		s.authMu.Lock()
+		s.dcOpened = true
+		authorized := s.authorized
+		s.authMu.Unlock()
+		if authorized && s.OnDCOpen != nil {
 			s.OnDCOpen()
 		}
 	})
 	dc.OnMessage(func(msg webrtc.DataChannelMessage) {
+		s.authMu.Lock()
+		authorized := s.authorized
+		s.authMu.Unlock()
+		if !authorized {
+			return
+		}
 		if !msg.IsString {
 			if s.OnBinary != nil {
 				s.OnBinary(msg.Data)
@@ -121,7 +134,12 @@ func New(ctx context.Context, mediaOpts hostmedia.Options) (*Session, string, er
 		switch state {
 		case webrtc.PeerConnectionStateConnected:
 			s.logSelectedPair()
-			s.startMedia()
+			s.authMu.Lock()
+			authorized := s.authorized
+			s.authMu.Unlock()
+			if authorized {
+				s.startMedia()
+			}
 		case webrtc.PeerConnectionStateFailed, webrtc.PeerConnectionStateClosed,
 			webrtc.PeerConnectionStateDisconnected:
 			if state == webrtc.PeerConnectionStateFailed {
@@ -236,6 +254,26 @@ func (s *Session) HandleAnswer(sdp string) error {
 		Type: webrtc.SDPTypeAnswer,
 		SDP:  sdp,
 	})
+}
+
+// Authorize はP2P経路の確立後、パスキーまたは再接続チケットの検証に
+// 成功した時だけ映像と入力を解禁する。接続確認中のDataChannel入力は捨てる。
+func (s *Session) Authorize() {
+	s.authMu.Lock()
+	if s.authorized {
+		s.authMu.Unlock()
+		return
+	}
+	s.authorized = true
+	dcOpened := s.dcOpened
+	s.authMu.Unlock()
+
+	if s.pc.ConnectionState() == webrtc.PeerConnectionStateConnected {
+		s.startMedia()
+	}
+	if dcOpened && s.OnDCOpen != nil {
+		s.OnDCOpen()
+	}
 }
 
 func (s *Session) logSelectedPair() {

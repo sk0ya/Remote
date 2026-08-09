@@ -67,9 +67,11 @@ export function saveCredId(credId: string): void {
 // 接続のたびにキーボードを作り直すので、覚えておかないと毎回切り替えることになる。
 export function loadPcIme(): boolean {
   try {
-    return localStorage.getItem(PCIME_KEY) === "1";
+    // 未設定時はPC変換を既定にする。スマホ変換では確定済みUnicodeを送るため、
+    // PC側のIME・予測変換・学習を通らない。
+    return localStorage.getItem(PCIME_KEY) !== "0";
   } catch {
-    return false;
+    return true;
   }
 }
 
