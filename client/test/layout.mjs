@@ -158,6 +158,13 @@ async function run(page, name, width, height) {
   ok(open.box.h > 40, `${name}: 映像の領域が潰れている`, `${open.box.h.toFixed(0)}px`);
   near(open.box.h, visible - open.panel.h, 1, `${name}: 映像の領域がキーボードのぶん詰められていない`);
   ok(!open.micShown, `${name}: 狭い映像の上にマイクボタンが残っている`);
+  // 映像の上の🎤が引っ込むぶん、キーボード側の🎤で喋れること
+  ok(open.kbdMic, `${name}: キーボードに🎤キーが無い`);
+  ok(
+    open.kbdMic && open.kbdMic.w >= 34 && open.kbdMic.h >= 30,
+    `${name}: 🎤キーが押しっぱなしにしづらい大きさ`,
+    open.kbdMic && `${open.kbdMic.w.toFixed(0)}x${open.kbdMic.h.toFixed(0)}px`
+  );
 
   // キーが指で押せる大きさか (細すぎると隣を押す)
   ok(
@@ -222,6 +229,11 @@ async function run(page, name, width, height) {
     `${name}: 1打したのにShiftのラベルが戻らない`
   );
   await page.evaluate("window.test.takeSent()");
+
+  // 🎤は押下の扱いをVoiceInputに任せる。ここで打鍵も送ると二重に反応する。
+  await page.evaluate("window.test.pressKey('🎤')");
+  const micSent = await page.evaluate("JSON.stringify(window.test.takeSent())").then(JSON.parse);
+  ok(micSent.length === 0, `${name}: 🎤キーが打鍵も送っている`, JSON.stringify(micSent));
 
   // 映像が見えている範囲に残っているか (真っ黒にならないこと)
   const shownTop = Math.max(open.content.y, 0);

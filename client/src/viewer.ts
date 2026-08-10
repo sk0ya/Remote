@@ -225,7 +225,7 @@ export function renderViewer(app: HTMLElement, hostId: string, onExit: () => voi
       controller = new InputController(video, surface, ev.channel);
       const ctl = controller;
       keyboard?.dispose(); // 再接続で古いキーボードのDOMを残さない
-      keyboard = new VirtualKeyboard(vroot, (msg) => ctl.send(msg), onKbdLayout);
+      keyboard = new VirtualKeyboard(vroot, (msg) => ctl.send(msg), onKbdLayout, voiceSupported());
       screen.apply(); // 新しいcontrollerに今の表示領域を教える
       // 開いた時点で、表示できる大きさを伝えてそこまで落として送ってもらう。
       // ondatachannel の時点ですでに開いていることもある。
@@ -238,11 +238,14 @@ export function renderViewer(app: HTMLElement, hostId: string, onExit: () => voi
       // onclick代入で再接続時の重複登録を防ぐ (addEventListenerだと2回目以降トグルが打ち消し合う)
       (document.getElementById("kbd-toggle") as HTMLButtonElement).onclick = () => keyboard?.toggle();
       // 音声入力 (対応ブラウザのみ。ボタンのハンドラはプロパティ代入なので再接続でも重複しない)
+      // 映像の上に浮かぶ🎤と、キーボードの🎤キーの両方から同じ録音を動かす。
+      // キーボードを出すと前者は引っ込むので、出していても喋れるようにする。
       if (voiceSupported()) {
         micBtn.style.display = "";
         voice?.dispose();
+        const kbdMic = keyboard.micButton();
         voice = new VoiceInput(
-          micBtn,
+          kbdMic ? [micBtn, kbdMic] : [micBtn],
           (msg) => ctl.send(msg),
           (buf) => ctl.sendBinary(buf),
           () => ctl.buffered,

@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { ABC_ROWS, NUM_ROWS, OP_ROWS, MODIFIERS, rowUnits, type Key } from "./keyboard";
+import { ABC_ROWS, NUM_ROWS, OP_ROWS, MIC_KEY, MODIFIERS, rowUnits, type Key } from "./keyboard";
 
 const LAYERS: Record<string, Key[][]> = { 文字面: ABC_ROWS, "数字・記号面": NUM_ROWS };
 const ALL = [...ABC_ROWS, ...NUM_ROWS, ...OP_ROWS].flat();
@@ -122,5 +122,35 @@ describe("キーの役割", () => {
   it("F1からF12まで揃っている", () => {
     const codes = new Set(ALL.map((k) => k.code));
     for (let i = 1; i <= 12; i++) expect(codes.has(`F${i}`), `F${i} が無い`).toBe(true);
+  });
+});
+
+// キーボードを出すと映像の上の🎤は引っ込むので、代わりが操作段に要る。
+describe("音声入力のキー", () => {
+  it("🎤は操作段に1つだけあり、PCへ送るコードを持たない", () => {
+    const mics = ALL.filter((k) => k.mic);
+    expect(mics).toEqual([MIC_KEY]);
+    expect(MIC_KEY.code).toBe("");
+    expect(OP_ROWS.flat()).toContain(MIC_KEY);
+  });
+
+  // 押しっぱなしにするキーなので、同じ段のキーより広く取る。
+  it("🎤は同じ段の他のキーより狭くない", () => {
+    const row = OP_ROWS.find((keys) => keys.includes(MIC_KEY))!;
+    for (const k of row) {
+      if (k === MIC_KEY || k.code === "Backspace") continue;
+      expect(k.w ?? 1, `${k.label} が🎤より広い`).toBeLessThanOrEqual(MIC_KEY.w!);
+    }
+  });
+
+  // 音声非対応のブラウザでは段から取り除く。隠すと段に空きマスが残るため。
+  it("🎤を外しても段の幅の比が破綻しない", () => {
+    const row = OP_ROWS.find((keys) => keys.includes(MIC_KEY))!;
+    const without = row.filter((k) => !k.mic);
+    expect(without).not.toContain(MIC_KEY);
+    expect(rowUnits(without)).toBeCloseTo(rowUnits(row) - MIC_KEY.w!, 5);
+    for (const k of without) {
+      expect((k.w ?? 1) / rowUnits(without)).toBeGreaterThanOrEqual(1 / 12);
+    }
   });
 });

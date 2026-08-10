@@ -288,6 +288,15 @@ input.field {
   border-color: #3d4a68;
 }
 
+/* 押しっぱなしで喋るキー。映像の上に浮かぶ🎤と同じ役割で、キーボードを
+   出しているあいだはこちらを使う。押している最中に長押しの選択・スクロール・
+   コールアウトが起きないよう、キー入力とは別に指の扱いを止める。 */
+.kbd-ops .kbd-key.kbd-mic {
+  font-size: 20px;
+  touch-action: none;
+  -webkit-touch-callout: none;
+}
+
 .kbd-key.active,
 .kbd-key:active,
 .kbd-ops .kbd-key.active,

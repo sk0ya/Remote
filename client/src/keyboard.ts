@@ -18,6 +18,7 @@ export interface Key {
   repeat?: boolean; // 押しっぱなしで連射する
   w?: number; // 段の中での幅の比 (既定1)
   layer?: boolean; // 面の切り替え。PCへは何も送らない
+  mic?: boolean; // 押しっぱなしで喋る。押下の扱いは VoiceInput に任せる
 }
 
 const letters = (s: string): Key[] =>
@@ -57,10 +58,17 @@ export const NUM_ROWS: Key[][] = [
   Array.from({ length: 12 }, (_, i) => ({ label: `F${i + 1}`, code: `F${i + 1}` })), // 12
 ];
 
+// 押しっぱなしで喋るキー。キーボードを出しているあいだは映像の上の🎤ボタンを
+// 引っ込めるので(狭くなった映像を隠すため)、こちらが代わりを務める。
+// 対応していないブラウザでは段から取り除く。display:noneで隠すと、段の幅の比は
+// キーの数ぶん組んであるので最後に空きマスが残ってしまう。
+export const MIC_KEY: Key = { label: "🎤", code: "", mic: true, w: 1.3 };
+
 // 操作段。どちらの面でも同じものが同じ位置に出る。
 // 矢印は候補選択とスクロールで一番使うので、この段でいちばん幅を取る。
 export const OP_ROWS: Key[][] = [
   [
+    MIC_KEY,
     { label: "Esc", code: "Escape" },
     { label: "Tab", code: "Tab" },
     { label: "Win", code: "MetaLeft", mod: true },
@@ -70,7 +78,7 @@ export const OP_ROWS: Key[][] = [
     { label: "PgDn", code: "PageDown", repeat: true },
     { label: "Del", code: "Delete", repeat: true },
     { label: "⌫", code: "Backspace", repeat: true, w: 1.5 },
-  ], // 9.5
+  ], // 10.8 (🎤なしなら9.5)
   [
     { label: "123", code: "", layer: true },
     { label: "⇧", code: "ShiftLeft", mod: true },
@@ -102,6 +110,8 @@ export class VirtualKeyboard {
   private boards: Record<Layer, HTMLElement>;
   private layer: Layer = "abc";
   private layerButton: HTMLButtonElement | null = null;
+  // 押しっぱなしで喋るキー。押下の扱いは持たず、VoiceInput に渡して使ってもらう。
+  private mic: HTMLButtonElement | null = null;
   private letterButtons: HTMLButtonElement[] = [];
   private sticky = new Set<string>();
   private stickyButtons = new Map<string, HTMLButtonElement>();
@@ -114,7 +124,9 @@ export class VirtualKeyboard {
     private send: Send,
     // パネルの高さが変わったことの通知 (映像の表示領域をそのぶん詰めてもらう)。
     // 開閉だけでなく、画面の回転でも高さは変わる。
-    private onLayout: (height: number) => void = () => {}
+    private onLayout: (height: number) => void = () => {},
+    // 音声入力に対応しているか。対応していなければ🎤キーを置かない。
+    withMic = false
   ) {
     this.root = document.createElement("div");
     this.root.className = "kbd hidden";
@@ -130,10 +142,11 @@ export class VirtualKeyboard {
     const ops = document.createElement("div");
     ops.className = "kbd-ops";
     for (const keys of OP_ROWS) {
-      const row = this.makeRow(keys);
+      const shown = withMic ? keys : keys.filter((k) => !k.mic);
+      const row = this.makeRow(shown);
       // 横持ちでは操作段を横に並べる。合計幅の比で分けると、段をまたいでも
       // キーの幅が揃う (CSSだけでは段の中身の量が分からない)。
-      row.style.flexGrow = String(rowUnits(keys));
+      row.style.flexGrow = String(rowUnits(shown));
       ops.appendChild(row);
     }
     this.root.appendChild(ops);
@@ -167,13 +180,23 @@ export class VirtualKeyboard {
     btn.type = "button";
     btn.className = "kbd-key";
     // 「PgUp」のような長いラベルは幅に入りきらない。文字を落として省略させない。
-    if (k.label.length >= 3) btn.classList.add("len3");
-    else if (k.label.length === 2) btn.classList.add("len2");
+    // 絵文字は1文字でもUTF-16では2つぶんなので、文字数はコードポイントで数える。
+    const len = [...k.label].length;
+    if (len >= 3) btn.classList.add("len3");
+    else if (len === 2) btn.classList.add("len2");
     if (k.layer) {
       btn.classList.add("kbd-layer-key");
       this.layerButton = btn;
     }
     btn.textContent = k.label;
+
+    // 🎤は押しっぱなしで喋るキーで、押下・離しの扱いは VoiceInput が持つ。
+    // ここでハンドラを付けると二重に反応するので、ボタンを渡すだけにする。
+    if (k.mic) {
+      btn.classList.add("kbd-mic");
+      this.mic = btn;
+      return btn;
+    }
 
     btn.addEventListener("pointerdown", (e) => {
       e.preventDefault(); // フォーカスを奪わない
@@ -254,6 +277,11 @@ export class VirtualKeyboard {
       const label = btn.textContent ?? "";
       btn.textContent = upper ? label.toUpperCase() : label.toLowerCase();
     }
+  }
+
+  // 押しっぱなしで喋るキー。押下の扱いを持たないので、VoiceInput に繋いでもらう。
+  micButton(): HTMLButtonElement | null {
+    return this.mic;
   }
 
   toggle(): void {

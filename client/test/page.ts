@@ -49,7 +49,13 @@ const screen = attachScreenLayout(
   vv as unknown as VisualViewport
 );
 const sent: object[] = [];
-const kbd = new VirtualKeyboard(vroot, (m) => sent.push(m), (h) => screen.setKeyboardHeight(h));
+// 実機と同じく🎤キーを載せた状態で測る (音声対応端末を想定)
+const kbd = new VirtualKeyboard(
+  vroot,
+  (m) => sent.push(m),
+  (h) => screen.setKeyboardHeight(h),
+  true
+);
 screen.apply(); // 実物も接続時にここまでやる
 
 // 要素の矩形 (transform適用後)
@@ -144,6 +150,7 @@ Object.assign(window, {
           return Math.round(r.width - used - (cells.length - 1) * gap);
         }),
         micShown: !!(document.querySelector(".mic") as HTMLElement | null)?.offsetParent,
+        kbdMic: rect(document.querySelector(".kbd-mic")),
       };
     },
   },

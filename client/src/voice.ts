@@ -39,34 +39,45 @@ export class VoiceInput {
   private startedAt = 0;
   private idleTimer = 0;
 
+  // 喋るボタンは複数ある。映像の上に浮かぶ🎤と、画面内キーボードの🎤キー。
+  // キーボードを出すと前者は引っ込む(狭い映像を隠さないため)ので、どちらの
+  // 状態でも喋れるように両方から同じ録音を動かす。
   constructor(
-    private btn: HTMLButtonElement,
+    private btns: HTMLButtonElement[],
     private send: Send,
     private sendBinary: SendBinary,
     private buffered: () => number,
     private onStatus: Status
   ) {
-    // 再接続で作り直されるため、addEventListenerではなくプロパティ代入で重複登録を防ぐ
-    btn.onpointerdown = (e) => {
-      e.preventDefault(); // 長押しの選択・スクロールを抑止
-      btn.setPointerCapture(e.pointerId); // 指がボタン外へずれてもpointerupを受け取る
-      void this.press();
-    };
-    btn.onpointerup = () => this.release();
-    btn.onpointercancel = () => this.release(true);
+    for (const btn of btns) {
+      // 再接続で作り直されるため、addEventListenerではなくプロパティ代入で重複登録を防ぐ
+      btn.onpointerdown = (e) => {
+        e.preventDefault(); // 長押しの選択・スクロールを抑止
+        btn.setPointerCapture(e.pointerId); // 指がボタン外へずれてもpointerupを受け取る
+        void this.press();
+      };
+      btn.onpointerup = () => this.release();
+      btn.onpointercancel = () => this.release(true);
+    }
+  }
+
+  // 録音中は押されたボタンだけでなく両方を光らせる。キーボードの開閉で
+  // 見えているボタンが入れ替わっても、録音中であることが分かる。
+  private setActive(on: boolean): void {
+    for (const btn of this.btns) btn.classList.toggle("active", on);
   }
 
   private async press(): Promise<void> {
     if (this.pressed) return;
     this.pressed = true;
-    this.btn.classList.add("active");
+    this.setActive(true);
     clearTimeout(this.idleTimer);
 
     try {
       await this.ensureStream();
     } catch (e) {
       this.pressed = false;
-      this.btn.classList.remove("active");
+      this.setActive(false);
       this.onStatus(micError(e), true);
       return;
     }
@@ -93,7 +104,7 @@ export class VoiceInput {
   private release(cancel = false): void {
     if (!this.pressed) return;
     this.pressed = false;
-    this.btn.classList.remove("active");
+    this.setActive(false);
     this.idleTimer = window.setTimeout(() => this.releaseMic(), IDLE_RELEASE_MS);
 
     const rec = this.rec;
@@ -142,9 +153,11 @@ export class VoiceInput {
   }
 
   dispose(): void {
-    this.btn.onpointerdown = null;
-    this.btn.onpointerup = null;
-    this.btn.onpointercancel = null;
+    for (const btn of this.btns) {
+      btn.onpointerdown = null;
+      btn.onpointerup = null;
+      btn.onpointercancel = null;
+    }
     clearTimeout(this.idleTimer);
     if (this.rec && this.rec.state !== "inactive") {
       this.rec.onstop = null;
