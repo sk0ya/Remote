@@ -1,86 +1,126 @@
 import { describe, it, expect } from "vitest";
-import { charStroke, textMessages, editMessages } from "./keyboard";
+import { ABC_ROWS, NUM_ROWS, OP_ROWS, MODIFIERS, rowUnits, type Key } from "./keyboard";
 
-// 打鍵にすると、PC側のIMEがローマ字を受け取って変換できる。
-// Unicode直接入力 (txt) だとIMEを素通りするので予測変換が効かない。
-describe("charStroke", () => {
-  it("英数字を打鍵にする", () => {
-    expect(charStroke("k")).toEqual({ code: "KeyK", shift: false });
-    expect(charStroke("A")).toEqual({ code: "KeyA", shift: true });
-    expect(charStroke("7")).toEqual({ code: "Digit7", shift: false });
+const LAYERS: Record<string, Key[][]> = { 文字面: ABC_ROWS, "数字・記号面": NUM_ROWS };
+const ALL = [...ABC_ROWS, ...NUM_ROWS, ...OP_ROWS].flat();
+
+describe("面の切り替え", () => {
+  // 切り替えで高さが動くと、そのぶん映像の領域も伸び縮みして落ち着かない。
+  it("どちらの面も同じ段数", () => {
+    expect(NUM_ROWS.length).toBe(ABC_ROWS.length);
   });
 
-  it("JISとUSで位置が同じ記号だけ打鍵にする", () => {
-    expect(charStroke("-")).toEqual({ code: "Minus", shift: false });
-    expect(charStroke(",")).toEqual({ code: "Comma", shift: false });
-    // @ はJISでは別の位置にある。打鍵で送ると違う文字が入るのでnull。
-    expect(charStroke("@")).toBeNull();
-    expect(charStroke("あ")).toBeNull();
-  });
-});
-
-describe("textMessages", () => {
-  it("小文字は押して離すだけ", () => {
-    expect(textMessages("ai")).toEqual([
-      { t: "key", code: "KeyA", down: true },
-      { t: "key", code: "KeyA", down: false },
-      { t: "key", code: "KeyI", down: true },
-      { t: "key", code: "KeyI", down: false },
-    ]);
+  it("操作段はどちらの面にも属さない", () => {
+    const layerCodes = new Set([...ABC_ROWS, ...NUM_ROWS].flat().map((k) => k.code));
+    for (const k of OP_ROWS.flat()) {
+      if (k.layer) continue;
+      expect(layerCodes.has(k.code), `${k.label} が面の中にもある`).toBe(false);
+    }
   });
 
-  it("大文字はShiftで挟む", () => {
-    expect(textMessages("K")).toEqual([
-      { t: "key", code: "ShiftLeft", down: true },
-      { t: "key", code: "KeyK", down: true },
-      { t: "key", code: "KeyK", down: false },
-      { t: "key", code: "ShiftLeft", down: false },
-    ]);
-  });
-
-  // 絵文字やスマホIMEで確定したかなは打鍵にできない。落とさずUnicodeで送る。
-  it("打鍵にできない文字は続くぶんをまとめてtxtにする", () => {
-    expect(textMessages("a@#b")).toEqual([
-      { t: "key", code: "KeyA", down: true },
-      { t: "key", code: "KeyA", down: false },
-      { t: "txt", s: "@#" },
-      { t: "key", code: "KeyB", down: true },
-      { t: "key", code: "KeyB", down: false },
-    ]);
+  // Enterは面をまたいで同じところ(2段目の右端)に出す。
+  it("Enterはどちらの面でも2段目の右端", () => {
+    for (const [name, rows] of Object.entries(LAYERS)) {
+      const row = rows[1];
+      expect(row[row.length - 1].code, name).toBe("Enter");
+    }
   });
 });
 
-describe("editMessages", () => {
-  it("増えたぶんだけ打鍵にする", () => {
-    expect(editMessages("ka", "kan")).toEqual([
-      { t: "key", code: "KeyN", down: true },
-      { t: "key", code: "KeyN", down: false },
-    ]);
+describe("キーの重複", () => {
+  it("同じキーを2か所に置かない", () => {
+    for (const [name, rows] of Object.entries(LAYERS)) {
+      const codes = [...rows.flat(), ...OP_ROWS.flat()].map((k) => k.code).filter(Boolean);
+      expect(new Set(codes).size, `${name}に重複がある`).toBe(codes.length);
+    }
+  });
+});
+
+describe("キーの幅", () => {
+  // 段の合計に対する比がそのまま画面上の幅になる。細すぎると隣を押す。
+  // 幅390pxの端末で、文字キーが約33px・Fキーが約28pxになる線。
+  it("細すぎるキーが無い", () => {
+    for (const keys of [...ABC_ROWS, ...NUM_ROWS, ...OP_ROWS]) {
+      const units = rowUnits(keys);
+      for (const k of keys) {
+        expect((k.w ?? 1) / units, `${k.label} が細い`).toBeGreaterThanOrEqual(1 / 12);
+      }
+    }
   });
 
-  it("消えたぶんはBackspaceにする", () => {
-    expect(editMessages("kan", "ka")).toEqual([
-      { t: "key", code: "Backspace", down: true },
-      { t: "key", code: "Backspace", down: false },
-    ]);
+  // 矢印は候補選択とスクロールで一番使うので、同じ段の修飾キーより広く取る。
+  it("矢印は操作段でいちばん広い", () => {
+    const ops = OP_ROWS[1];
+    const arrow = ops.find((k) => k.code === "ArrowLeft")!;
+    for (const k of ops) {
+      if (k.code.startsWith("Arrow") || k.code === "Space") continue;
+      expect(k.w ?? 1, `${k.label} が矢印より広い`).toBeLessThanOrEqual(arrow.w!);
+    }
+  });
+});
+
+describe("キーの役割", () => {
+  it("押しっぱなしで動かしたいキーは連射できる", () => {
+    const repeating = new Set(ALL.filter((k) => k.repeat).map((k) => k.code));
+    for (const code of [
+      "ArrowLeft",
+      "ArrowRight",
+      "ArrowUp",
+      "ArrowDown",
+      "Backspace",
+      "Delete",
+      "PageUp",
+      "PageDown",
+      "Space",
+    ]) {
+      expect(repeating.has(code), `${code} が連射できない`).toBe(true);
+    }
   });
 
-  it("違う末尾に差し替えたら、消してから打ち直す", () => {
-    expect(editMessages("kan", "kai")).toEqual([
-      { t: "key", code: "Backspace", down: true },
-      { t: "key", code: "Backspace", down: false },
-      { t: "key", code: "KeyI", down: true },
-      { t: "key", code: "KeyI", down: false },
-    ]);
+  // 修飾キーは押しっぱなしで残るので、離す側の一覧から漏れると押されたままになる。
+  it("修飾キーはすべて解除の対象に入っている", () => {
+    const mods = ALL.filter((k) => k.mod).map((k) => k.code);
+    expect([...MODIFIERS].sort()).toEqual([...new Set(mods)].sort());
+    expect(MODIFIERS).toContain("ShiftLeft");
+    expect(MODIFIERS).toContain("ControlLeft");
+    expect(MODIFIERS).toContain("AltLeft");
+    expect(MODIFIERS).toContain("MetaLeft");
   });
 
-  it("変化なしなら何も送らない", () => {
-    expect(editMessages("kan", "kan")).toEqual([]);
+  // 修飾キーと矢印は面を切り替えずに打てること (Ctrl+C も候補選択も文字面のまま)
+  it("修飾キー・矢印・編集キーは操作段にある", () => {
+    const ops = new Set(OP_ROWS.flat().map((k) => k.code));
+    for (const code of [
+      "ControlLeft",
+      "AltLeft",
+      "ShiftLeft",
+      "MetaLeft",
+      "Escape",
+      "Tab",
+      "Backspace",
+      "Delete",
+      "Home",
+      "End",
+      "PageUp",
+      "PageDown",
+      "ArrowLeft",
+      "ArrowRight",
+      "ArrowUp",
+      "ArrowDown",
+      "Space",
+    ]) {
+      expect(ops.has(code), `${code} が操作段に無い`).toBe(true);
+    }
   });
 
-  // 全選択して消した、のような操作でPC側の関係ない文字まで消さないようにする。
-  it("Backspaceは上限で頭打ちにする", () => {
-    const back = editMessages("x".repeat(100), "").filter((m) => (m as { down: boolean }).down);
-    expect(back).toHaveLength(32);
+  it("面の切り替えキーは1つだけで、PCへ送るコードを持たない", () => {
+    const layerKeys = ALL.filter((k) => k.layer);
+    expect(layerKeys).toHaveLength(1);
+    expect(layerKeys[0].code).toBe("");
+  });
+
+  it("F1からF12まで揃っている", () => {
+    const codes = new Set(ALL.map((k) => k.code));
+    for (let i = 1; i <= 12; i++) expect(codes.has(`F${i}`), `F${i} が無い`).toBe(true);
   });
 });

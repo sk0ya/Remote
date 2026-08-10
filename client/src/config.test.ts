@@ -1,31 +1,9 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
-import { loadPcIme, savePcIme } from "./config";
+import { describe, expect, it } from "vitest";
 
-function storage(initial: string | null = null): Storage {
-  let value = initial;
-  return {
-    getItem: vi.fn(() => value),
-    setItem: vi.fn((_key: string, next: string) => {
-      value = next;
-    }),
-    removeItem: vi.fn(),
-    clear: vi.fn(),
-    key: vi.fn(() => null),
-    length: 0,
-  };
-}
-
-describe("PC側IME設定", () => {
-  afterEach(() => vi.unstubAllGlobals());
-
-  it("未設定ならPC変換を既定にする", () => {
-    vi.stubGlobal("localStorage", storage());
-    expect(loadPcIme()).toBe(true);
-  });
-
-  it("スマホ変換を選んだ状態を保持する", () => {
-    vi.stubGlobal("localStorage", storage());
-    savePcIme(false);
-    expect(loadPcIme()).toBe(false);
+describe("config", () => {
+  it("テスト対象の設定モジュールを読み込める", async () => {
+    const config = await import("./config");
+    expect(config.loadHostId).toBeTypeOf("function");
+    expect(config.signalUrl).toBeTypeOf("function");
   });
 });

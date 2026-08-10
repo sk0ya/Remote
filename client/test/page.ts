@@ -48,7 +48,8 @@ const screen = attachScreenLayout(
   (occluded) => controller.relayout(occluded),
   vv as unknown as VisualViewport
 );
-const kbd = new VirtualKeyboard(vroot, () => {}, (h) => screen.setKeyboardHeight(h));
+const sent: object[] = [];
+const kbd = new VirtualKeyboard(vroot, (m) => sent.push(m), (h) => screen.setKeyboardHeight(h));
 screen.apply(); // 実物も接続時にここまでやる
 
 // 要素の矩形 (transform適用後)
@@ -81,9 +82,41 @@ Object.assign(window, {
     toggleKeyboard() {
       kbd.toggle();
     },
+    // 数字・記号面へ切り替える (押されたときと同じ経路を通す)
+    toggleLayer() {
+      document
+        .querySelector(".kbd-layer-key")
+        ?.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, cancelable: true }));
+    },
+    // 出ている面のラベル。面を切り替えたことの確認に使う。
+    layerKeyLabel: () => document.querySelector(".kbd-layer-key")?.textContent ?? "",
+    // ラベルでキーを押す (実物と同じ pointerdown の経路を通す)
+    pressKey(label: string) {
+      const btn = [...document.querySelectorAll(".kbd-key")].find(
+        (el) => el.textContent === label && (el as HTMLElement).offsetParent
+      );
+      if (!btn) throw new Error(`キーが見つからない: ${label}`);
+      btn.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, cancelable: true }));
+      btn.dispatchEvent(new PointerEvent("pointerup", { bubbles: true, cancelable: true }));
+    },
+    // 文字キーのラベル (Shiftで大文字になることの確認に使う)
+    letterLabels: () =>
+      [...document.querySelectorAll(".kbd-layer:not([hidden]) .kbd-key")]
+        .map((el) => el.textContent)
+        .join(""),
+    takeSent() {
+      return sent.splice(0, sent.length);
+    },
     measure() {
-      const bar = document.querySelector(".kbd-bar");
-      const btn = bar?.querySelector("button");
+      const ops = document.querySelector(".kbd-ops") as HTMLElement | null;
+      const key = document.querySelector(".kbd-key") as HTMLElement | null;
+      // 出ている面の分だけ (隠れている面は幅0で混ざるので除く)
+      const keys = [...document.querySelectorAll(".kbd-key")].filter(
+        (el) => (el as HTMLElement).offsetParent
+      ) as HTMLElement[];
+      const rows = [...document.querySelectorAll(".kbd-row")].filter(
+        (el) => (el as HTMLElement).offsetParent
+      ) as HTMLElement[];
       return {
         visibleHeight: vv.height,
         viewer: rect(vroot),
@@ -92,8 +125,24 @@ Object.assign(window, {
         video: rect(video),
         content: contentRect(),
         transform: getComputedStyle(video).transform,
-        barHeight: bar ? (bar as HTMLElement).offsetHeight : 0,
-        keyHeight: btn ? (btn as HTMLElement).offsetHeight : 0,
+        opsHeight: ops ? ops.offsetHeight : 0,
+        keyHeight: key ? key.offsetHeight : 0,
+        // 一番細いキーと、その名前 (押せない幅になっていないかを見る)
+        minKey: keys.length
+          ? keys
+              .map((el) => ({ w: el.getBoundingClientRect().width, label: el.textContent ?? "" }))
+              .reduce((a, b) => (a.w <= b.w ? a : b))
+          : null,
+        // 段が重なっていないか (段の上端の種類を数える)
+        rowTops: [...new Set(rows.map((el) => Math.round(el.getBoundingClientRect().top)))].length,
+        // 段の中に穴が空いていないか。段の幅とキーの合計が合うかで見る。
+        rowGaps: rows.map((el) => {
+          const r = el.getBoundingClientRect();
+          const gap = parseFloat(getComputedStyle(el).columnGap) || 0;
+          const cells = [...el.children].map((c) => c.getBoundingClientRect());
+          const used = cells.reduce((n, c) => n + c.width, 0);
+          return Math.round(r.width - used - (cells.length - 1) * gap);
+        }),
         micShown: !!(document.querySelector(".mic") as HTMLElement | null)?.offsetParent,
       };
     },

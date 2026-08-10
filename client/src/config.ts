@@ -7,7 +7,6 @@
 
 const KEY = "remote.hostId";
 const CRED_KEY = "remote.credId";
-const PCIME_KEY = "remote.pcIme";
 
 // シグナリングサーバーのURL。
 // 本番は VITE_SIGNAL_URL(Cloudflare WorkerのURL)、開発時は同一ホストの8787へ。
@@ -60,25 +59,5 @@ export function saveCredId(credId: string): void {
     localStorage.setItem(CRED_KEY, credId);
   } catch {
     /* 指定できないだけで、選択式にフォールバックする */
-  }
-}
-
-// キーボードの変換モード。true ならPC側のIMEで変換する(打鍵をそのまま送る)。
-// 接続のたびにキーボードを作り直すので、覚えておかないと毎回切り替えることになる。
-export function loadPcIme(): boolean {
-  try {
-    // 未設定時はPC変換を既定にする。スマホ変換では確定済みUnicodeを送るため、
-    // PC側のIME・予測変換・学習を通らない。
-    return localStorage.getItem(PCIME_KEY) !== "0";
-  } catch {
-    return true;
-  }
-}
-
-export function savePcIme(on: boolean): void {
-  try {
-    localStorage.setItem(PCIME_KEY, on ? "1" : "0");
-  } catch {
-    /* 覚えられないだけで、その場の切り替えは効く */
   }
 }

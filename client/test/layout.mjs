@@ -1,5 +1,5 @@
 // スマホでの見え方の検証。実物のCSSと部品を本物のブラウザに載せ、
-// ソフトキーボードを出した状態のレイアウトを測って確かめる。
+// 画面内キーボードを出した状態のレイアウトを測って確かめる。
 //
 // jsdomはレイアウトを持たない(幅も高さも0)ので、この種の不具合はユニット
 // テストでは捕まらない。ヘッドレスChromeをCDPで直接動かす(依存を増やさない)。
@@ -116,8 +116,6 @@ function near(a, b, tol, what) {
   ok(Math.abs(a - b) <= tol, what, `${a.toFixed(1)} と ${b.toFixed(1)} が ${tol}px 以上ちがう`);
 }
 
-const OS_KEYBOARD = { 縦持ち: 300, 横持ち: 190 }; // ソフトキーボードの高さの目安
-
 async function run(page, name, width, height) {
   await page.call("Emulation.setDeviceMetricsOverride", {
     width,
@@ -145,20 +143,85 @@ async function run(page, name, width, height) {
   ok(closed.micShown, `${name}: マイクボタンが出ていない`);
   ok(closed.content.h > 0 && closed.content.w > 0, `${name}: 映像が表示されていない`);
 
-  // 2. 特殊キーバーを開き、ソフトキーボードが下から出た状態にする
+  // 2. 画面内キーボードを開いた状態にする
   await page.evaluate("window.test.toggleKeyboard()");
   await new Promise((r) => setTimeout(r, 100)); // ResizeObserverの通知を待つ
-  const visible = height - OS_KEYBOARD[name];
+  // OSキーボードは自動表示しない。画面内パネルだけが下端を使う。
+  const visible = height;
   await page.evaluate(`window.test.setVisibleHeight(${visible})`);
   await new Promise((r) => setTimeout(r, 100));
   const open = await page.evaluate("JSON.stringify(window.test.measure())").then(JSON.parse);
 
-  ok(open.panel, `${name}: 特殊キーバーが出ていない`);
+  ok(open.panel, `${name}: キーボードが出ていない`);
   near(open.viewer.h, visible - open.panel.h, 1, `${name}: ビューアがキーボードの下に潜っている`);
-  near(open.panel.bottom, visible, 1, `${name}: バーがキーボードに隠れている`);
+  near(open.panel.bottom, visible, 1, `${name}: キーボードが画面の下にはみ出している`);
   ok(open.box.h > 40, `${name}: 映像の領域が潰れている`, `${open.box.h.toFixed(0)}px`);
-  near(open.box.h, visible - open.panel.h, 1, `${name}: 映像の領域がバーのぶん詰められていない`);
+  near(open.box.h, visible - open.panel.h, 1, `${name}: 映像の領域がキーボードのぶん詰められていない`);
   ok(!open.micShown, `${name}: 狭い映像の上にマイクボタンが残っている`);
+
+  // キーが指で押せる大きさか (細すぎると隣を押す)
+  ok(
+    open.minKey && open.minKey.w >= 30,
+    `${name}: 細すぎるキーがある`,
+    open.minKey && `${open.minKey.label} が ${open.minKey.w.toFixed(0)}px`
+  );
+  // 段の中に空きマスが無いこと (以前は方向キーの手前に穴が空いていた)
+  ok(
+    open.rowGaps.every((g) => Math.abs(g) <= 2),
+    `${name}: 段に空きマスが残っている`,
+    `余り ${open.rowGaps.join(",")}px`
+  );
+
+  // 数字・記号面へ切り替えても、高さと操作段の位置が動かないこと
+  await page.evaluate("window.test.toggleLayer()");
+  await new Promise((r) => setTimeout(r, 50));
+  const num = await page.evaluate("JSON.stringify(window.test.measure())").then(JSON.parse);
+  ok(
+    (await page.evaluate("window.test.layerKeyLabel()")) === "ABC",
+    `${name}: 123を押しても面が変わらない`
+  );
+  near(num.panel.h, open.panel.h, 1, `${name}: 面を切り替えると高さが変わる`);
+  ok(
+    num.minKey && num.minKey.w >= 24,
+    `${name}: 数字・記号面に細すぎるキーがある`,
+    num.minKey && `${num.minKey.label} が ${num.minKey.w.toFixed(0)}px`
+  );
+  ok(
+    num.rowGaps.every((g) => Math.abs(g) <= 2),
+    `${name}: 数字・記号面の段に空きマスが残っている`,
+    `余り ${num.rowGaps.join(",")}px`
+  );
+  await page.evaluate("window.test.toggleLayer()"); // 文字面へ戻す
+  await new Promise((r) => setTimeout(r, 50));
+
+  // 修飾キーは押した時点で降り、次の1打のあとに離れる (Ctrl+C が1打ずつで打てる)
+  await page.evaluate("window.test.takeSent()");
+  await page.evaluate("window.test.pressKey('Ctrl')");
+  await page.evaluate("window.test.pressKey('c')");
+  const combo = await page.evaluate("JSON.stringify(window.test.takeSent())").then(JSON.parse);
+  ok(
+    JSON.stringify(combo) ===
+      JSON.stringify([
+        { t: "key", code: "ControlLeft", down: true },
+        { t: "key", code: "KeyC", down: true },
+        { t: "key", code: "KeyC", down: false },
+        { t: "key", code: "ControlLeft", down: false },
+      ]),
+    `${name}: Ctrl+C の打鍵が組み合わせになっていない`,
+    JSON.stringify(combo)
+  );
+
+  // Shiftを押したら手元のラベルも大文字になる (送る前に効いているか分かる)
+  const lower = await page.evaluate("window.test.letterLabels()");
+  await page.evaluate("window.test.pressKey('⇧')");
+  const upper = await page.evaluate("window.test.letterLabels()");
+  ok(upper === lower.toUpperCase() && upper !== lower, `${name}: Shiftでラベルが大文字にならない`);
+  await page.evaluate("window.test.pressKey('A')"); // 大文字になっているので'A'
+  ok(
+    (await page.evaluate("window.test.letterLabels()")) === lower,
+    `${name}: 1打したのにShiftのラベルが戻らない`
+  );
+  await page.evaluate("window.test.takeSent()");
 
   // 映像が見えている範囲に残っているか (真っ黒にならないこと)
   const shownTop = Math.max(open.content.y, 0);
@@ -226,12 +289,17 @@ try {
   const portrait = await run(page, "縦持ち", 390, 844);
   const landscape = await run(page, "横持ち", 844, 390);
 
-  // 横持ちでは特殊キーが1段に収まること (2段だと映像に残る高さが半分になる)
+  // 縦持ちは 文字3段 + 操作2段 の5段
+  ok(portrait.open.rowTops === 5, "縦持ち: 段数が5段ではない", `${portrait.open.rowTops}段`);
+
+  // 横持ちでは操作段2つが横に並んで1段になること
+  // (縦に積むと映像に残る高さがさらに1段ぶん減る)
   ok(
-    landscape.open.barHeight < landscape.open.keyHeight * 1.5,
-    "横持ち: 特殊キーが1段に収まっていない",
-    `バー ${landscape.open.barHeight}px / キー ${landscape.open.keyHeight}px`
+    landscape.open.opsHeight < landscape.open.keyHeight * 1.5,
+    "横持ち: 操作段が1段に収まっていない",
+    `操作段 ${landscape.open.opsHeight}px / キー ${landscape.open.keyHeight}px`
   );
+  ok(landscape.open.rowTops === 4, "横持ち: 段数が4段ではない", `${landscape.open.rowTops}段`);
   console.log(
     `縦持ち: パネル ${portrait.open.panel.h.toFixed(0)}px / ` +
       `映像に残る高さ ${portrait.open.box.h.toFixed(0)}px`
