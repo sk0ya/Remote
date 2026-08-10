@@ -6,6 +6,7 @@ import { VirtualKeyboard } from "./keyboard";
 import { assertPasskey, ticketMAC, b64uDecode } from "./webauthn";
 import { loadCredId, saveCredId } from "./config";
 import { VoiceInput, voiceSupported } from "./voice";
+import { TextInput } from "./text";
 import { currentViewport } from "./viewport";
 import { attachScreenLayout } from "./screen";
 import { PROTOCOL_VERSION } from "./protocol";
@@ -26,11 +27,18 @@ export const VIEWER_HTML = `
         <span id="vst" class="status">接続中...</span>
         <span class="hud-btns">
           <button class="ghost" id="disp-toggle" style="display:none"></button>
-          <button class="ghost" id="kbd-toggle">⌨</button>
+          <button class="ghost" id="kbd-toggle" title="Webアプリのキーボード">Web⌨</button>
+          <button class="ghost text-input-toggle" id="text-toggle" style="display:none" title="スマホOSのキーボード">OS⌨</button>
           <button class="ghost" id="exit">切断</button>
         </span>
       </div>
       <button class="mic" id="mic" style="display:none">🎤</button>
+      <form class="text-entry" id="text-entry" hidden autocomplete="off">
+        <input id="text-field" type="text" inputmode="text" enterkeyhint="send"
+               autocapitalize="sentences" autocomplete="off" placeholder="PCへ入力" />
+        <button class="text-send" type="submit">送信</button>
+        <button class="text-close" id="text-close" type="button" aria-label="閉じる">×</button>
+      </form>
     </div>`;
 
 export function renderViewer(app: HTMLElement, hostId: string, onExit: () => void): void {
@@ -41,10 +49,15 @@ export function renderViewer(app: HTMLElement, hostId: string, onExit: () => voi
   const st = document.getElementById("vst")!;
   const dispBtn = document.getElementById("disp-toggle") as HTMLButtonElement;
   const micBtn = document.getElementById("mic") as HTMLButtonElement;
+  const textToggle = document.getElementById("text-toggle") as HTMLButtonElement;
+  const textEntry = document.getElementById("text-entry") as HTMLFormElement;
+  const textField = document.getElementById("text-field") as HTMLInputElement;
+  const textClose = document.getElementById("text-close") as HTMLButtonElement;
   const gate = document.getElementById("playgate") as HTMLButtonElement;
   let pc: RTCPeerConnection | null = null;
   let keyboard: VirtualKeyboard | null = null;
   let voice: VoiceInput | null = null;
+  let text: TextInput | null = null;
   let controller: InputController | null = null;
   let exited = false;
   // スマホがバックグラウンドに回っている / 画面が消えている。
@@ -93,6 +106,8 @@ export function renderViewer(app: HTMLElement, hostId: string, onExit: () => voi
     screen.dispose();
     voice?.dispose();
     voice = null;
+    text?.dispose();
+    text = null;
     controller?.dispose();
     controller = null;
     pc?.close();
@@ -248,6 +263,16 @@ export function renderViewer(app: HTMLElement, hostId: string, onExit: () => voi
       const ctl = controller;
       keyboard?.dispose(); // 再接続で古いキーボードのDOMを残さない
       keyboard = new VirtualKeyboard(vroot, (msg) => ctl.send(msg), onKbdLayout, voiceSupported());
+      text?.dispose();
+      text = new TextInput(
+        textToggle,
+        textEntry,
+        textField,
+        textClose,
+        (msg) => ctl.send(msg),
+        () => keyboard?.close()
+      );
+      textToggle.style.display = "";
       screen.apply(); // 新しいcontrollerに今の表示領域を教える
       // 開いた時点で、表示できる大きさを伝えてそこまで落として送ってもらう。
       // ondatachannel の時点ですでに開いていることもある。
@@ -258,7 +283,10 @@ export function renderViewer(app: HTMLElement, hostId: string, onExit: () => voi
       if (ev.channel.readyState === "open") onReady();
       else ev.channel.onopen = onReady;
       // onclick代入で再接続時の重複登録を防ぐ (addEventListenerだと2回目以降トグルが打ち消し合う)
-      (document.getElementById("kbd-toggle") as HTMLButtonElement).onclick = () => keyboard?.toggle();
+      (document.getElementById("kbd-toggle") as HTMLButtonElement).onclick = () => {
+        text?.close();
+        keyboard?.toggle();
+      };
       // 音声入力 (対応ブラウザのみ。ボタンのハンドラはプロパティ代入なので再接続でも重複しない)
       // 映像の上に浮かぶ🎤と、キーボードの🎤キーの両方から同じ録音を動かす。
       // キーボードを出すと前者は引っ込むので、出していても喋れるようにする。

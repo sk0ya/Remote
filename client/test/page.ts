@@ -9,6 +9,7 @@
 import { VIEWER_HTML } from "../src/viewer";
 import { VirtualKeyboard } from "../src/keyboard";
 import { InputController } from "../src/input";
+import { TextInput } from "../src/text";
 import { attachScreenLayout } from "../src/screen";
 
 const CONTENT = { w: 1920, h: 1080 };
@@ -56,6 +57,12 @@ const kbd = new VirtualKeyboard(
   (h) => screen.setKeyboardHeight(h),
   true
 );
+const textToggle = document.getElementById("text-toggle") as HTMLButtonElement;
+const textEntry = document.getElementById("text-entry") as HTMLFormElement;
+const textField = document.getElementById("text-field") as HTMLInputElement;
+const textClose = document.getElementById("text-close") as HTMLButtonElement;
+const text = new TextInput(textToggle, textEntry, textField, textClose, (m) => sent.push(m), () => kbd.close());
+textToggle.style.display = "";
 screen.apply(); // 実物も接続時にここまでやる
 
 function findKey(label: string): Element {
@@ -99,6 +106,16 @@ Object.assign(window, {
     },
     toggleKeyboard() {
       kbd.toggle();
+    },
+    openText() {
+      textToggle.click();
+    },
+    sendText(value: string) {
+      textField.value = value;
+      textEntry.requestSubmit();
+    },
+    closeText() {
+      text.close();
     },
     // 数字・記号面へ切り替える (押されたときと同じ経路を通す)
     toggleLayer() {
@@ -172,6 +189,7 @@ Object.assign(window, {
         }),
         micShown: !!(document.querySelector(".mic") as HTMLElement | null)?.offsetParent,
         kbdMic: rect(document.querySelector(".kbd-mic")),
+        textEntry: rect(document.querySelector(".text-entry:not([hidden])")),
         gateShown: !!(document.getElementById("playgate") as HTMLElement).offsetParent,
       };
     },

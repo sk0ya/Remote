@@ -187,6 +187,70 @@ input.field {
   display: none;
 }
 
+/* Webアプリ側とOS側のキーボードを同じHUDに並べる。2つの違いが
+   アイコンだけで分かりにくいので、ボタンの文字で経路を明示する。 */
+.viewer .hud button.text-input-toggle.active {
+  background: #3b6cf5;
+  border-color: #3b6cf5;
+}
+
+/* スマホ標準キーボードの直上に出す入力欄。--kbd-bottom は visualViewport
+   から screen.ts が更新するので、iOS/Androidでもキーボードに隠れない。 */
+.text-entry {
+  position: fixed;
+  left: 8px;
+  right: 8px;
+  bottom: calc(var(--kbd-bottom, 0px) + 8px);
+  z-index: 12;
+  display: flex;
+  gap: 6px;
+  padding: 6px;
+  border: 1px solid #2a3348;
+  border-radius: 10px;
+  background: rgba(17, 19, 24, 0.94);
+}
+
+.text-entry[hidden] {
+  display: none;
+}
+
+.text-entry input {
+  min-width: 0;
+  flex: 1;
+  appearance: none;
+  border: 1px solid #35415c;
+  border-radius: 7px;
+  background: #252c3a;
+  color: #f2f4f8;
+  font: inherit;
+  font-size: 16px;
+  padding: 8px 10px;
+}
+
+.text-entry button {
+  appearance: none;
+  border: 1px solid #35415c;
+  border-radius: 7px;
+  background: #252c3a;
+  color: #f2f4f8;
+  min-width: 44px;
+  padding: 0 10px;
+  font: inherit;
+  cursor: pointer;
+  touch-action: manipulation;
+}
+
+.text-entry .text-send {
+  background: #3b6cf5;
+  border-color: #3b6cf5;
+}
+
+.text-entry .text-close {
+  min-width: 36px;
+  padding: 0;
+  font-size: 20px;
+}
+
 .surface {
   position: absolute;
   inset: 0;

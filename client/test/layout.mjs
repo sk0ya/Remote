@@ -145,6 +145,17 @@ async function run(page, name, width, height) {
 
   // 自動再生が止められたときの再生ボタン。ふだんは出ていないこと。
   ok(!closed.gateShown, `${name}: 再生ボタンが最初から出ている`);
+  await page.evaluate("window.test.openText()");
+  const textOpen = await page.evaluate("JSON.stringify(window.test.measure())").then(JSON.parse);
+  ok(textOpen.textEntry, `${name}: 標準キーボード用の入力欄が開かない`);
+  await page.evaluate("window.test.sendText('日本語😀')");
+  const textSent = await page.evaluate("JSON.stringify(window.test.takeSent())").then(JSON.parse);
+  ok(
+    JSON.stringify(textSent) === JSON.stringify([{ t: "txt", s: "日本語😀" }]),
+    `${name}: 標準キーボードの文字列がPCへ送られない`,
+    JSON.stringify(textSent)
+  );
+  await page.evaluate("window.test.closeText()");
   await page.evaluate("window.test.showPlayGate(true)");
   // 映像の中央では操作面より手前で受ける (止まった映像へタップを送らせない)
   ok(

@@ -301,6 +301,10 @@ export class VirtualKeyboard {
     return this.mic;
   }
 
+  close(): void {
+    if (!this.root.classList.contains("hidden")) this.toggle();
+  }
+
   toggle(): void {
     const hidden = this.root.classList.toggle("hidden");
     if (hidden) {
