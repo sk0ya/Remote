@@ -4,7 +4,7 @@
 // レイアウトの考え方:
 //   - 文字(ABC)と数字・記号(123)を面で分ける。1画面に詰め込まないぶん1キーを
 //     太くでき、段数が減って映像に残る高さも増える。
-//   - 修飾キー・矢印・Esc/Del/Home/End は「操作段」に置く。面を切り替えても
+//   - 修飾キー・矢印・Esc/Del・半角/全角 は「操作段」に置く。面を切り替えても
 //     位置が動かないので、Ctrl+C も候補の選択も面の往復なしで打てる。
 //   - 幅は段ごとの比 (w) をデータに持たせ、CSSのnth-childでは当てない。
 //     キーを足し引きしても他の段が崩れない。
@@ -45,7 +45,6 @@ export const ABC_ROWS: Key[][] = [
 export const NUM_ROWS: Key[][] = [
   [..."1234567890"].map((c) => ({ label: c, code: `Digit${c}` })), // 10
   [
-    { label: "`", code: "Backquote" },
     { label: "-", code: "Minus" },
     { label: "=", code: "Equal" },
     { label: "[", code: "BracketLeft" },
@@ -54,7 +53,7 @@ export const NUM_ROWS: Key[][] = [
     { label: ";", code: "Semicolon" },
     { label: "'", code: "Quote" },
     ENTER,
-  ], // 9.4
+  ], // 8.4
   Array.from({ length: 12 }, (_, i) => ({ label: `F${i + 1}`, code: `F${i + 1}` })), // 12
 ];
 
@@ -64,6 +63,13 @@ export const NUM_ROWS: Key[][] = [
 // キーの数ぶん組んであるので最後に空きマスが残ってしまう。
 export const MIC_KEY: Key = { label: "🎤", code: "", mic: true, w: 1.3 };
 
+// IMEの入切。JIS配列では 0x29 (USの ` の位置) がそのまま半角/全角キーなので、
+// 送るコードは Backquote のまま、ラベルだけキートップに合わせる。記号面に ` を
+// 別で置かないのは、JISのPCではこのキーから ` は出ない (Shift+@ の側にある) から。
+// PCがUS配列なら押しても ` が入るだけだが、その場合のIME切り替えは Alt+` なので、
+// 同じ段の Alt を先に押してから叩けば通る。
+const IME_KEY: Key = { label: "半/全", code: "Backquote", w: 1.2 };
+
 // 操作段。どちらの面でも同じものが同じ位置に出る。
 // 矢印は候補選択とスクロールで一番使うので、この段でいちばん幅を取る。
 export const OP_ROWS: Key[][] = [
@@ -72,13 +78,10 @@ export const OP_ROWS: Key[][] = [
     { label: "Esc", code: "Escape" },
     { label: "Tab", code: "Tab" },
     { label: "Win", code: "MetaLeft", mod: true },
-    { label: "Home", code: "Home" },
-    { label: "End", code: "End" },
-    { label: "PgUp", code: "PageUp", repeat: true },
-    { label: "PgDn", code: "PageDown", repeat: true },
+    IME_KEY,
     { label: "Del", code: "Delete", repeat: true },
     { label: "⌫", code: "Backspace", repeat: true, w: 1.5 },
-  ], // 10.8 (🎤なしなら9.5)
+  ], // 8 (🎤なしなら6.7)
   [
     { label: "123", code: "", layer: true },
     { label: "⇧", code: "ShiftLeft", mod: true },
@@ -180,7 +183,7 @@ export class VirtualKeyboard {
     const btn = document.createElement("button");
     btn.type = "button";
     btn.className = "kbd-key";
-    // 「PgUp」のような長いラベルは幅に入りきらない。文字を落として省略させない。
+    // 「Ctrl」のような長いラベルは幅に入りきらない。文字を落として省略させない。
     // 絵文字は1文字でもUTF-16では2つぶんなので、文字数はコードポイントで数える。
     const len = [...k.label].length;
     if (len >= 3) btn.classList.add("len3");

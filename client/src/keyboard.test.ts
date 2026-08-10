@@ -69,8 +69,6 @@ describe("キーの役割", () => {
       "ArrowDown",
       "Backspace",
       "Delete",
-      "PageUp",
-      "PageDown",
       "Space",
     ]) {
       expect(repeating.has(code), `${code} が連射できない`).toBe(true);
@@ -88,6 +86,7 @@ describe("キーの役割", () => {
   });
 
   // 修飾キーと矢印は面を切り替えずに打てること (Ctrl+C も候補選択も文字面のまま)
+  // 半角/全角 (Backquote) も、日本語を打つ途中で面を往復せずに切り替えたい。
   it("修飾キー・矢印・編集キーは操作段にある", () => {
     const ops = new Set(OP_ROWS.flat().map((k) => k.code));
     for (const code of [
@@ -99,10 +98,7 @@ describe("キーの役割", () => {
       "Tab",
       "Backspace",
       "Delete",
-      "Home",
-      "End",
-      "PageUp",
-      "PageDown",
+      "Backquote",
       "ArrowLeft",
       "ArrowRight",
       "ArrowUp",
