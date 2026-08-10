@@ -82,3 +82,62 @@ func TestRecordAnswerOnlyAcceptsFirstAnswer(t *testing.T) {
 		t.Fatal("重複answerで認証対象を書き換えた")
 	}
 }
+
+func TestSDPICEUfrag(t *testing.T) {
+	sdp := "v=0\r\no=- 1 2 IN IP4 127.0.0.1\r\nm=video 9 UDP/TLS/RTP/SAVPF 96\r\n" +
+		"a=ice-ufrag:Xk9Q\r\na=ice-pwd:secret\r\n"
+	if got := sdpICEUfrag(sdp); got != "Xk9Q" {
+		t.Fatalf("ice-ufragを取り出せない: %q", got)
+	}
+	if got := sdpICEUfrag("v=0\r\na=ice-pwd:secret\r\n"); got != "" {
+		t.Fatalf("ice-ufragが無いのに %q を返した", got)
+	}
+}
+
+// 接続要求が入れ替わると、前の要求で集めた候補が遅れて届く。ufragで見分ける。
+func TestRecordAnswerKeepsUfragForCandidateMatching(t *testing.T) {
+	pending := &pendingAuth{}
+	a := &app{pending: pending}
+	a.recordAnswer("v=0\r\na=ice-ufrag:AAAA\r\n")
+	if pending.ufrag != "AAAA" {
+		t.Fatalf("answerのufragを控えていない: %q", pending.ufrag)
+	}
+
+	stale, current := "BBBB", "AAAA"
+	if stale == pending.ufrag {
+		t.Fatal("テストの前提が壊れている")
+	}
+	// 実際の判定と同じ条件で、古い候補だけが弾かれることを見る
+	drop := func(uf *string) bool {
+		return uf != nil && *uf != "" && pending.ufrag != "" && *uf != pending.ufrag
+	}
+	if !drop(&stale) {
+		t.Fatal("古い接続要求の候補を受け入れてしまう")
+	}
+	if drop(&current) {
+		t.Fatal("今の接続要求の候補を捨ててしまう")
+	}
+	if drop(nil) {
+		t.Fatal("ufrag未設定の候補を捨ててしまう")
+	}
+}
+
+// answerの適用に失敗した仮セッションは登録から外す。
+// 残すと、閉じたPeerConnectionへICE候補を注ぎ続けることになる。
+func TestDetachPendingClearsOnlyItsOwn(t *testing.T) {
+	pending := &pendingAuth{}
+	a := &app{pending: pending}
+	if !a.detachPending(pending) || a.pending != nil {
+		t.Fatal("失敗した仮セッションが登録に残っている")
+	}
+
+	// 入れ替わった後に古い方を外そうとしても、今の仮セッションは巻き添えにしない
+	newer := &pendingAuth{}
+	a.pending = newer
+	if a.detachPending(pending) {
+		t.Fatal("入れ替わった後なのに外せたと報告した")
+	}
+	if a.pending != newer {
+		t.Fatal("新しい仮セッションを巻き添えにした")
+	}
+}

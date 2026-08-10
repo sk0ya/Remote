@@ -58,6 +58,18 @@ const kbd = new VirtualKeyboard(
 );
 screen.apply(); // 実物も接続時にここまでやる
 
+function findKey(label: string): Element {
+  const btn = [...document.querySelectorAll(".kbd-key")].find(
+    (el) => el.textContent === label && (el as HTMLElement).offsetParent
+  );
+  if (!btn) throw new Error(`キーが見つからない: ${label}`);
+  return btn;
+}
+
+function fire(btn: Element, type: string): void {
+  btn.dispatchEvent(new PointerEvent(type, { bubbles: true, cancelable: true }));
+}
+
 // 要素の矩形 (transform適用後)
 function rect(el: Element | null) {
   if (!el) return null;
@@ -96,15 +108,16 @@ Object.assign(window, {
     },
     // 出ている面のラベル。面を切り替えたことの確認に使う。
     layerKeyLabel: () => document.querySelector(".kbd-layer-key")?.textContent ?? "",
-    // ラベルでキーを押す (実物と同じ pointerdown の経路を通す)
+    // ラベルでキーを押す (実物と同じ pointerdown の経路を通す)。
+    // 押した時点でラベルが変わる(Shiftの大文字化)ので、要素は先に1回だけ引く。
     pressKey(label: string) {
-      const btn = [...document.querySelectorAll(".kbd-key")].find(
-        (el) => el.textContent === label && (el as HTMLElement).offsetParent
-      );
-      if (!btn) throw new Error(`キーが見つからない: ${label}`);
-      btn.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, cancelable: true }));
-      btn.dispatchEvent(new PointerEvent("pointerup", { bubbles: true, cancelable: true }));
+      const btn = findKey(label);
+      fire(btn, "pointerdown");
+      fire(btn, "pointerup");
     },
+    // 押しっぱなし・離すを別々に起こす (連射の検証に使う)
+    keyDown: (label: string) => fire(findKey(label), "pointerdown"),
+    keyUp: (label: string) => fire(findKey(label), "pointerup"),
     // 文字キーのラベル (Shiftで大文字になることの確認に使う)
     letterLabels: () =>
       [...document.querySelectorAll(".kbd-layer:not([hidden]) .kbd-key")]
@@ -112,6 +125,14 @@ Object.assign(window, {
         .join(""),
     takeSent() {
       return sent.splice(0, sent.length);
+    },
+    // 自動再生が止められた状態を作る
+    showPlayGate(on: boolean) {
+      (document.getElementById("playgate") as HTMLElement).hidden = !on;
+    },
+    // その座標でいちばん手前にある要素のid (重なり順の確認に使う)
+    topIdAt(x: number, y: number) {
+      return document.elementFromPoint(x, y)?.id ?? "";
     },
     measure() {
       const ops = document.querySelector(".kbd-ops") as HTMLElement | null;
@@ -151,6 +172,7 @@ Object.assign(window, {
         }),
         micShown: !!(document.querySelector(".mic") as HTMLElement | null)?.offsetParent,
         kbdMic: rect(document.querySelector(".kbd-mic")),
+        gateShown: !!(document.getElementById("playgate") as HTMLElement).offsetParent,
       };
     },
   },

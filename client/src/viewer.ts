@@ -21,6 +21,7 @@ export const VIEWER_HTML = `
     <div class="viewer" id="vroot">
       <video id="screen" autoplay playsinline muted></video>
       <div class="surface" id="surface"></div>
+      <button class="playgate" id="playgate" hidden>▶ タップして再生</button>
       <div class="hud">
         <span id="vst" class="status">接続中...</span>
         <span class="hud-btns">
@@ -40,6 +41,7 @@ export function renderViewer(app: HTMLElement, hostId: string, onExit: () => voi
   const st = document.getElementById("vst")!;
   const dispBtn = document.getElementById("disp-toggle") as HTMLButtonElement;
   const micBtn = document.getElementById("mic") as HTMLButtonElement;
+  const gate = document.getElementById("playgate") as HTMLButtonElement;
   let pc: RTCPeerConnection | null = null;
   let keyboard: VirtualKeyboard | null = null;
   let voice: VoiceInput | null = null;
@@ -183,6 +185,27 @@ export function renderViewer(app: HTMLElement, hostId: string, onExit: () => voi
     st.classList.toggle("error", error);
   };
 
+  // 自動再生が止められたときだけ出す再生ボタン。ステータス表示と違って
+  // 接続の進行では消えないので、押すまで復帰の手段が残る。
+  const playgate = {
+    show(): void {
+      gate.hidden = false;
+      setStatus("映像の再生が端末に止められました", true);
+    },
+    hide(): void {
+      gate.hidden = true;
+    },
+  };
+  gate.onclick = () => {
+    void video
+      .play()
+      .then(() => {
+        playgate.hide();
+        setStatus("");
+      })
+      .catch((e) => setStatus(`映像を再生できません: ${e}`, true));
+  };
+
   // 音声の処理結果など、一定時間で消える表示
   const toast = (text: string, error = false) => {
     setStatus(text, error);
@@ -210,14 +233,13 @@ export function renderViewer(app: HTMLElement, hostId: string, onExit: () => voi
     };
     pc.ontrack = (ev) => {
       video.srcObject = ev.streams[0] ?? new MediaStream([ev.track]);
-      video.play().catch(() => {
-        setStatus("映像の再生が端末に止められました — タップして再生", true);
-        st.onclick = () => {
-          video.play().then(() => setStatus("")).catch((e) => {
-            setStatus(`映像を再生できません: ${e}`, true);
-          });
-        };
-      });
+      // 端末が自動再生を止めることがある。復帰の手段はステータス表示には
+      // 載せない — ステータスは接続の進行で何度も書き換わるので、そのたびに
+      // タップ先ごと消えて、映像が止まったまま戻せなくなる。
+      void video
+        .play()
+        .then(() => playgate.hide())
+        .catch(() => playgate.show());
     };
     pc.ondatachannel = (ev) => {
       if (ev.channel.label !== "input") return;

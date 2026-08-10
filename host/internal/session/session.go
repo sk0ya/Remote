@@ -27,17 +27,21 @@ var iceServers = []webrtc.ICEServer{
 
 // newPeerConnection はIPv4/IPv6の両方でICE候補を集める。
 //
-// Pionの既定値にも依存できるが、ホスト側のIPv6対応を明示しておくことで、
-// ルーターや回線にグローバルIPv6が付いたときに、コード変更なしで候補へ
-// 反映される。TURNなしでモバイル回線と繋ぐには、このIPv6の共通経路が
-// 重要になる。
+// UDPだけを挙げるのは、TCPの候補がここでは絶対に出ないため。Pionは
+// SettingEngine.SetICETCPMux でmuxを渡さないかぎりTCPの収集を丸ごと飛ばす
+// (ice/v4 gather.go の `if a.tcpMux == nil { continue }`)ので、TCP4/TCP6を
+// 並べても候補は1つも増えず、「TCPでも繋がる」という誤解だけが残る。
+//
+// なお、この4種を並べた状態はPionの既定値そのもの (NetworkTypesが空なら
+// supportedNetworkTypes() に落ちる) で、指定しても挙動は変わらなかった。
+// UDPに絞った今も候補の中身は変わらない — 変わったのは、コードが実際の
+// 収集内容と一致するようになったことだけ。TURNなしでモバイル回線と繋ぐには
+// IPv6の共通経路が要るので、UDP6を明示して意図を残す。
 func newPeerConnection(config webrtc.Configuration) (*webrtc.PeerConnection, error) {
 	var settings webrtc.SettingEngine
 	settings.SetNetworkTypes([]webrtc.NetworkType{
 		webrtc.NetworkTypeUDP4,
 		webrtc.NetworkTypeUDP6,
-		webrtc.NetworkTypeTCP4,
-		webrtc.NetworkTypeTCP6,
 	})
 	return webrtc.NewAPI(
 		webrtc.WithSettingEngine(settings),

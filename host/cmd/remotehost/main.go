@@ -108,8 +108,20 @@ type pendingAuth struct {
 	nonce  []byte
 	offer  string
 	answer string // P2P疎通確認に適用済みのanswer。認証チャレンジにもこの値を使う。
+	ufrag  string // answerのice-ufrag。この接続要求のICE候補かどうかの照合に使う。
 	gen    uint64 // 世代番号。タイムアウトが古い世代を巻き添えにしないための目印
 	timer  *time.Timer
+}
+
+// sdpICEUfrag はSDPから a=ice-ufrag の値を取り出す。見つからなければ空。
+// ICE候補にも同じ値が入っているので、どの接続要求で集めた候補かを見分けられる。
+func sdpICEUfrag(sdp string) string {
+	for _, line := range strings.Split(sdp, "\n") {
+		if v, ok := strings.CutPrefix(strings.TrimSpace(line), "a=ice-ufrag:"); ok {
+			return strings.TrimSpace(v)
+		}
+	}
+	return ""
 }
 
 // 1発話あたりの音声データの上限 (opusなら数十KB程度。桁違いのものは捨てる)
@@ -237,7 +249,34 @@ func (a *app) recordAnswer(sdp string) *pendingAuth {
 		return nil
 	}
 	p.answer = sdp
+	p.ufrag = sdpICEUfrag(sdp)
 	return p
+}
+
+// abortAuth は仮セッションを畳んで登録から外す。入れ替わっていれば何もしない
+// (新しい要求で別のセッションが入っているとき、それを巻き添えにしない)。
+//
+// answerの適用に失敗したときはこれで捨てる。放置すると answer だけ記録された
+// 仮セッションが残り、閉じたPeerConnectionへICE候補を注ぎ続けることになる。
+func (a *app) abortAuth(p *pendingAuth) {
+	if a.detachPending(p) {
+		p.sess.Close()
+	}
+}
+
+// detachPending は仮セッションpを登録から外す。外せたらtrue。
+// 既に別のものへ入れ替わっていればfalseで、そのときpは呼び出し側が畳む。
+func (a *app) detachPending(p *pendingAuth) bool {
+	a.sessMu.Lock()
+	defer a.sessMu.Unlock()
+	if a.pending != p {
+		return false
+	}
+	if p.timer != nil {
+		p.timer.Stop()
+	}
+	a.pending = nil
+	return true
 }
 
 // promote は認証を通った仮セッションを現行セッションに昇格させ、古い方を畳む。
@@ -404,7 +443,7 @@ func (a *app) onMessage(msg json.RawMessage, peerIP string) {
 		}
 		if err := p.sess.HandleAnswer(m.SDP); err != nil {
 			log.Printf("session: answer適用失敗: %v", err)
-			p.sess.Close()
+			a.abortAuth(p) // 登録からも外す (閉じた相手に候補を送り続けない)
 			return
 		}
 		log.Printf("session: answer適用 — P2P疎通確認待ち")
@@ -417,6 +456,13 @@ func (a *app) onMessage(msg json.RawMessage, peerIP string) {
 		p := a.pending
 		a.sessMu.Unlock()
 		if p == nil || p.answer == "" {
+			return
+		}
+		// 別の接続要求が来て仮セッションが入れ替わると、前の要求で集めていた
+		// 候補が遅れて届く。ufragは候補を集めた側のもので、その要求のanswerと
+		// 一致するので、食い違うものは今のセッションのものではない。
+		if uf := m.Candidate.UsernameFragment; uf != nil && *uf != "" && p.ufrag != "" && *uf != p.ufrag {
+			log.Printf("session: 古い接続要求のICE候補 — 破棄")
 			return
 		}
 		if err := applyICECandidate(m.Version, m.Candidate, p.sess); err != nil {

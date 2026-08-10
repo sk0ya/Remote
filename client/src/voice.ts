@@ -153,6 +153,9 @@ export class VoiceInput {
   }
 
   dispose(): void {
+    // 押しっぱなしのまま切断されることがある。映像の上の🎤は再接続でも同じ
+    // 要素を使い回すので、光らせたままにすると録音中に見えたまま残る。
+    this.setActive(false);
     for (const btn of this.btns) {
       btn.onpointerdown = null;
       btn.onpointerup = null;

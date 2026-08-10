@@ -195,6 +195,27 @@ input.field {
   -webkit-user-select: none;
 }
 
+/* 端末が自動再生を止めたときだけ出る再生ボタン。映像の上を覆って、
+   操作面(.surface)より手前で受ける — 止まっている映像へタップを送っても
+   何も起きないので、まず再生させる。HUDはこれより後ろの兄弟なので、
+   出ているあいだも切断ボタンは押せる。 */
+.viewer .playgate {
+  position: absolute;
+  inset: 0;
+  appearance: none;
+  border: none;
+  background: rgba(17, 19, 24, 0.72);
+  color: #e6e8ee;
+  font-size: 16px;
+  font-weight: 600;
+  cursor: pointer;
+  touch-action: manipulation;
+}
+
+.viewer .playgate[hidden] {
+  display: none;
+}
+
 /* ソフトキーボードを出すと、映像に使える高さは画面の半分以下しか残らない。
    このパネルはそこからさらに削る側なので、余白も文字も詰めて低く保つ。
    文字面(3段)+操作段(2段)の5段で、どちらの面に切り替えても高さは変わらない。 */

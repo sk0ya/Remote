@@ -115,8 +115,9 @@ export class VirtualKeyboard {
   private letterButtons: HTMLButtonElement[] = [];
   private sticky = new Set<string>();
   private stickyButtons = new Map<string, HTMLButtonElement>();
-  private repeatDelay = 0;
-  private repeatTimer = 0;
+  // 連射のタイマーはキーごとに持つ。1組を使い回すと、↓を押しながら別の指で
+  // ⌫を叩いたときに、離していない↓の連射まで止まってしまう。
+  private repeats = new Map<HTMLButtonElement, { delay: number; interval: number }>();
   private observer: ResizeObserver;
 
   constructor(
@@ -202,11 +203,11 @@ export class VirtualKeyboard {
       e.preventDefault(); // フォーカスを奪わない
       if (k.layer) this.setLayer(this.layer === "abc" ? "num" : "abc");
       else if (k.mod) this.toggleModifier(k.code, btn);
-      else this.pressKey(k);
+      else this.pressKey(k, btn);
     });
     if (k.repeat) {
       for (const ev of ["pointerup", "pointercancel", "pointerleave"]) {
-        btn.addEventListener(ev, () => this.stopRepeat());
+        btn.addEventListener(ev, () => this.stopRepeat(btn));
       }
     }
     if (k.mod) this.stickyButtons.set(k.code, btn);
@@ -222,20 +223,33 @@ export class VirtualKeyboard {
     if (this.layerButton) this.layerButton.textContent = layer === "abc" ? "123" : "ABC";
   }
 
-  private pressKey(k: Key): void {
+  private pressKey(k: Key, btn: HTMLButtonElement): void {
     this.tapKey(k.code);
     if (!k.repeat) return;
-    this.stopRepeat();
-    this.repeatDelay = window.setTimeout(() => {
-      this.repeatTimer = window.setInterval(() => this.tapKey(k.code), REPEAT_INTERVAL_MS);
+    this.stopRepeat(btn); // 同じキーの押し直し
+    const t = { delay: 0, interval: 0 };
+    t.delay = window.setTimeout(() => {
+      t.interval = window.setInterval(() => this.tapKey(k.code), REPEAT_INTERVAL_MS);
     }, REPEAT_DELAY_MS);
+    this.repeats.set(btn, t);
   }
 
-  private stopRepeat(): void {
-    clearTimeout(this.repeatDelay);
-    clearInterval(this.repeatTimer);
-    this.repeatDelay = 0;
-    this.repeatTimer = 0;
+  // btnを渡すとそのキーだけ、省くと全部止める(閉じるとき・片付けるとき)。
+  private stopRepeat(btn?: HTMLButtonElement): void {
+    const clear = (t: { delay: number; interval: number }): void => {
+      clearTimeout(t.delay);
+      clearInterval(t.interval);
+    };
+    if (btn) {
+      const t = this.repeats.get(btn);
+      if (t) {
+        clear(t);
+        this.repeats.delete(btn);
+      }
+      return;
+    }
+    for (const t of this.repeats.values()) clear(t);
+    this.repeats.clear();
   }
 
   private tapKey(code: string): void {

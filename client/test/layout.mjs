@@ -143,6 +143,22 @@ async function run(page, name, width, height) {
   ok(closed.micShown, `${name}: マイクボタンが出ていない`);
   ok(closed.content.h > 0 && closed.content.w > 0, `${name}: 映像が表示されていない`);
 
+  // 自動再生が止められたときの再生ボタン。ふだんは出ていないこと。
+  ok(!closed.gateShown, `${name}: 再生ボタンが最初から出ている`);
+  await page.evaluate("window.test.showPlayGate(true)");
+  // 映像の中央では操作面より手前で受ける (止まった映像へタップを送らせない)
+  ok(
+    (await page.evaluate(`window.test.topIdAt(${width / 2}, ${height / 2})`)) === "playgate",
+    `${name}: 再生ボタンが操作面の裏に隠れている`
+  );
+  // 出ているあいだも切断ボタンは押せること (HUDはこれより手前)
+  const exitId = await page.evaluate(`(() => {
+    const r = document.getElementById("exit").getBoundingClientRect();
+    return window.test.topIdAt(r.x + r.width / 2, r.y + r.height / 2);
+  })()`);
+  ok(exitId === "exit", `${name}: 再生ボタンが切断ボタンを覆っている`, exitId);
+  await page.evaluate("window.test.showPlayGate(false)");
+
   // 2. 画面内キーボードを開いた状態にする
   await page.evaluate("window.test.toggleKeyboard()");
   await new Promise((r) => setTimeout(r, 100)); // ResizeObserverの通知を待つ
@@ -234,6 +250,20 @@ async function run(page, name, width, height) {
   await page.evaluate("window.test.pressKey('🎤')");
   const micSent = await page.evaluate("JSON.stringify(window.test.takeSent())").then(JSON.parse);
   ok(micSent.length === 0, `${name}: 🎤キーが打鍵も送っている`, JSON.stringify(micSent));
+
+  // 連射中に別の指で違うキーを叩いても、押しっぱなしの側は連射を続けること
+  // (タイマーを1組で使い回していると、ここで止まっていた)
+  await page.evaluate("window.test.keyDown('↓')");
+  await page.evaluate("window.test.pressKey('⌫')"); // 2本目の指でタップ
+  await new Promise((r) => setTimeout(r, 600)); // 連射開始(400ms)+数回ぶん
+  await page.evaluate("window.test.keyUp('↓')");
+  const held = await page.evaluate("JSON.stringify(window.test.takeSent())").then(JSON.parse);
+  const downs = held.filter((m) => m.code === "ArrowDown" && m.down).length;
+  ok(downs > 1, `${name}: 別のキーを叩くと押しっぱなしの連射が止まる`, `↓ が ${downs} 回だけ`);
+  // 離したら止まること (離した後に増えていないか見る)
+  await new Promise((r) => setTimeout(r, 200));
+  const after = await page.evaluate("JSON.stringify(window.test.takeSent())").then(JSON.parse);
+  ok(after.length === 0, `${name}: 離しても連射が止まらない`, JSON.stringify(after).slice(0, 80));
 
   // 映像が見えている範囲に残っているか (真っ黒にならないこと)
   const shownTop = Math.max(open.content.y, 0);
