@@ -25,6 +25,25 @@ var iceServers = []webrtc.ICEServer{
 	{URLs: []string{"stun:stun.l.google.com:19302"}},
 }
 
+// newPeerConnection はIPv4/IPv6の両方でICE候補を集める。
+//
+// Pionの既定値にも依存できるが、ホスト側のIPv6対応を明示しておくことで、
+// ルーターや回線にグローバルIPv6が付いたときに、コード変更なしで候補へ
+// 反映される。TURNなしでモバイル回線と繋ぐには、このIPv6の共通経路が
+// 重要になる。
+func newPeerConnection(config webrtc.Configuration) (*webrtc.PeerConnection, error) {
+	var settings webrtc.SettingEngine
+	settings.SetNetworkTypes([]webrtc.NetworkType{
+		webrtc.NetworkTypeUDP4,
+		webrtc.NetworkTypeUDP6,
+		webrtc.NetworkTypeTCP4,
+		webrtc.NetworkTypeTCP6,
+	})
+	return webrtc.NewAPI(
+		webrtc.WithSettingEngine(settings),
+	).NewPeerConnection(config)
+}
+
 type Session struct {
 	pc          *webrtc.PeerConnection
 	track       *webrtc.TrackLocalStaticSample
@@ -69,7 +88,7 @@ func sameCapture(a, b hostmedia.Options) bool {
 
 // New はPeerConnectionを作り、gathering完了済みのoffer SDPを返す。
 func New(ctx context.Context, mediaOpts hostmedia.Options) (*Session, string, error) {
-	pc, err := webrtc.NewPeerConnection(webrtc.Configuration{ICEServers: iceServers})
+	pc, err := newPeerConnection(webrtc.Configuration{ICEServers: iceServers})
 	if err != nil {
 		return nil, "", err
 	}
