@@ -145,6 +145,8 @@ async function run(page, name, width, height) {
 
   // 自動再生が止められたときの再生ボタン。ふだんは出ていないこと。
   ok(!closed.gateShown, `${name}: 再生ボタンが最初から出ている`);
+  const focus = { x: 0.5, y: 0.8 };
+  await page.evaluate(`window.test.tapScreen(${focus.x}, ${focus.y})`);
   await page.evaluate("window.test.openText()");
   const textOpen = await page.evaluate("JSON.stringify(window.test.measure())").then(JSON.parse);
   ok(textOpen.textEntry, `${name}: 標準キーボード用の入力欄が開かない`);
@@ -155,7 +157,30 @@ async function run(page, name, width, height) {
     `${name}: 標準キーボードの文字列がPCへ送られない`,
     JSON.stringify(textSent)
   );
+  const osOccluded = Math.round(height * 0.35);
+  await page.evaluate(`window.test.setVisibleHeight(${height - osOccluded})`);
+  await new Promise((r) => setTimeout(r, 100));
+  const osOpen = await page.evaluate("JSON.stringify(window.test.measure())").then(JSON.parse);
+  ok(osOpen.textEntry, `${name}: OSキーボード表示中に入力欄が消えている`);
+  near(osOpen.viewer.h, osOpen.textEntry.y, 1, `${name}: OS入力欄が映像の上に重なっている`);
+  near(
+    osOpen.textEntry.bottom,
+    height - osOccluded - 8,
+    1,
+    `${name}: OS入力欄がOSキーボード直上にない`
+  );
+  ok(!osOpen.micShown, `${name}: OSキーボード表示中にマイクが残っている`);
+  const osFocused = await page.evaluate(
+    `window.test.transformedScreenPoint(${focus.x}, ${focus.y})`
+  );
+  near(osFocused.x, osOpen.box.w / 2, 3, `${name}: OS表示時のフォーカス横位置がずれている`);
+  ok(osFocused.y >= 0 && osFocused.y <= osOpen.box.h, `${name}: OS表示時のフォーカスが映像外にある`);
   await page.evaluate("window.test.closeText()");
+  await page.evaluate(`window.test.setVisibleHeight(${height})`);
+  await new Promise((r) => setTimeout(r, 100));
+  // 画面下側の入力欄をタップしてからキーボードを開く。中央固定ではなく、
+  // このフォーカス位置が残りの表示領域へ移動することを検証する。
+  await page.evaluate(`window.test.tapScreen(${focus.x}, ${focus.y})`);
   await page.evaluate("window.test.showPlayGate(true)");
   // 映像の中央では操作面より手前で受ける (止まった映像へタップを送らせない)
   ok(
@@ -178,6 +203,21 @@ async function run(page, name, width, height) {
   await page.evaluate(`window.test.setVisibleHeight(${visible})`);
   await new Promise((r) => setTimeout(r, 100));
   const open = await page.evaluate("JSON.stringify(window.test.measure())").then(JSON.parse);
+
+  const focused = await page.evaluate(
+    `window.test.transformedScreenPoint(${focus.x}, ${focus.y})`
+  );
+  near(
+    focused.x,
+    open.box.w / 2,
+    3,
+    `${name}: フォーカス箇所の横位置が表示領域に来ていない`
+  );
+  ok(
+    focused.y >= 0 && focused.y <= open.box.h,
+    `${name}: フォーカス箇所が表示領域にScrollIntoViewされていない`,
+    JSON.stringify({ focused, box: open.box, transform: open.transform })
+  );
 
   ok(open.panel, `${name}: キーボードが出ていない`);
   near(open.viewer.h, visible - open.panel.h, 1, `${name}: ビューアがキーボードの下に潜っている`);

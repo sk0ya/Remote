@@ -15,8 +15,10 @@
 export interface ScreenLayout {
   // 表示領域を測り直して反映する
   apply(): void;
-  // 特殊キーバーの高さ(隠しているときは0)。映像はこのぶんも上に詰める。
-  setKeyboardHeight(height: number): void;
+  // Webキーボードの高さ(隠しているときは0)。映像はこのぶんも上に詰める。
+  setWebKeyboardHeight(height: number): void;
+  // OSキーボード直上の入力欄と余白の高さ(閉じているときは0)。
+  setTextInputHeight(height: number): void;
   dispose(): void;
 }
 
@@ -26,7 +28,12 @@ export function attachScreenLayout(
   onChanged: (occluded: boolean) => void,
   vv: VisualViewport | null = window.visualViewport
 ): ScreenLayout {
-  let kbdHeight = 0;
+  let webKeyboardHeight = 0;
+  let textInputHeight = 0;
+
+  // 切り替え中にResizeObserverの通知順が前後しても、片方の閉じた通知で
+  // 開いている方のアクセサリを消さない。
+  const accessoryHeight = (): number => Math.max(webKeyboardHeight, textInputHeight);
 
   // ソフトキーボードが覆っている高さ。信用できない値は0(=覆っていない)にする。
   // 認証ダイアログやバックグラウンドで0や桁違いの値が来ることがあり、それを
@@ -41,13 +48,18 @@ export function attachScreenLayout(
 
   const apply = (): void => {
     const occluded = occludedHeight();
-    // 特殊キーバーはキーボードの直上に置く (バー自身は position:fixed)
-    document.documentElement.style.setProperty("--kbd-bottom", `${occluded}px`);
-    // 映像はさらにバーのぶんだけ上で終わらせる。
+    // 下部アクセサリはOSキーボードの直上に置く (バー自身は position:fixed)
+    document.documentElement.style.setProperty(
+      "--viewport-occlusion-bottom",
+      `${occluded}px`
+    );
+    // 映像はOSキーボードと下部アクセサリのぶんだけ上で終わらせる。
     // 避けるものが何も無いときは指定自体を消して、CSSの inset:0 の素の状態に戻す
     // (映像の箱にこちらから触れている状態を残さない)。
-    const raise = occluded + kbdHeight;
+    const accessory = accessoryHeight();
+    const raise = occluded + accessory;
     viewer.style.bottom = raise > 0 ? `${raise}px` : "";
+    viewer.classList.toggle("keyboard-open", accessory > 0);
     onChanged(raise > 0);
   };
 
@@ -58,17 +70,20 @@ export function attachScreenLayout(
 
   return {
     apply,
-    setKeyboardHeight(height: number): void {
-      kbdHeight = height > 0 ? height : 0;
-      // 開いているあいだは映像に残る高さが僅かなので、重なるものを退ける
-      viewer.classList.toggle("kbd-open", kbdHeight > 0);
+    setWebKeyboardHeight(height: number): void {
+      webKeyboardHeight = height > 0 ? height : 0;
+      apply();
+    },
+    setTextInputHeight(height: number): void {
+      textInputHeight = height > 0 ? height : 0;
       apply();
     },
     dispose(): void {
       vv?.removeEventListener("resize", apply);
       vv?.removeEventListener("scroll", apply);
       viewer.style.bottom = "";
-      document.documentElement.style.removeProperty("--kbd-bottom");
+      viewer.classList.remove("keyboard-open");
+      document.documentElement.style.removeProperty("--viewport-occlusion-bottom");
     },
   };
 }

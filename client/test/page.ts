@@ -24,6 +24,9 @@ app.innerHTML = VIEWER_HTML;
 const video = document.getElementById("screen") as HTMLVideoElement;
 const surface = document.getElementById("surface")!;
 const vroot = document.getElementById("vroot")!;
+// CDPから合成したPointerEventには実在するポインターが無く、Chromeの
+// setPointerCapture()が例外になるため、レイアウトテストでは捕捉だけ無効化する。
+surface.setPointerCapture = () => {};
 
 // canvasを映像源にして、実物と同じく videoWidth/videoHeight が入った状態にする
 const canvas = document.createElement("canvas");
@@ -54,14 +57,22 @@ const sent: object[] = [];
 const kbd = new VirtualKeyboard(
   vroot,
   (m) => sent.push(m),
-  (h) => screen.setKeyboardHeight(h),
+  (h) => screen.setWebKeyboardHeight(h),
   true
 );
 const textToggle = document.getElementById("text-toggle") as HTMLButtonElement;
 const textEntry = document.getElementById("text-entry") as HTMLFormElement;
 const textField = document.getElementById("text-field") as HTMLInputElement;
 const textClose = document.getElementById("text-close") as HTMLButtonElement;
-const text = new TextInput(textToggle, textEntry, textField, textClose, (m) => sent.push(m), () => kbd.close());
+const text = new TextInput(
+  textToggle,
+  textEntry,
+  textField,
+  textClose,
+  (m) => sent.push(m),
+  () => kbd.close(),
+  (h) => screen.setTextInputHeight(h)
+);
 textToggle.style.display = "";
 screen.apply(); // 実物も接続時にここまでやる
 
@@ -75,6 +86,27 @@ function findKey(label: string): Element {
 
 function fire(btn: Element, type: string): void {
   btn.dispatchEvent(new PointerEvent(type, { bubbles: true, cancelable: true }));
+}
+
+function screenPoint(x: number, y: number): { x: number; y: number } {
+  const r = video.getBoundingClientRect();
+  const s = Math.min(r.width / video.videoWidth, r.height / video.videoHeight);
+  return {
+    x: r.left + (r.width - video.videoWidth * s) / 2 + video.videoWidth * s * x,
+    y: r.top + (r.height - video.videoHeight * s) / 2 + video.videoHeight * s * y,
+  };
+}
+
+function transformedScreenPoint(x: number, y: number): { x: number; y: number } {
+  const w = video.clientWidth;
+  const h = video.clientHeight;
+  const s = Math.min(w / video.videoWidth, h / video.videoHeight);
+  const p = {
+    x: (w - video.videoWidth * s) / 2 + video.videoWidth * s * x,
+    y: (h - video.videoHeight * s) / 2 + video.videoHeight * s * y,
+  };
+  const m = new DOMMatrix(getComputedStyle(video).transform);
+  return { x: m.a * p.x + m.e, y: m.d * p.y + m.f };
 }
 
 // 要素の矩形 (transform適用後)
@@ -132,6 +164,20 @@ Object.assign(window, {
       fire(btn, "pointerdown");
       fire(btn, "pointerup");
     },
+    tapScreen(x: number, y: number) {
+      const p = screenPoint(x, y);
+      const init = {
+        bubbles: true,
+        cancelable: true,
+        pointerId: 42,
+        pointerType: "touch",
+        clientX: p.x,
+        clientY: p.y,
+      };
+      surface.dispatchEvent(new PointerEvent("pointerdown", init));
+      surface.dispatchEvent(new PointerEvent("pointerup", init));
+    },
+    transformedScreenPoint,
     // 押しっぱなし・離すを別々に起こす (連射の検証に使う)
     keyDown: (label: string) => fire(findKey(label), "pointerdown"),
     keyUp: (label: string) => fire(findKey(label), "pointerup"),

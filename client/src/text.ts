@@ -5,10 +5,12 @@
 // Unicode文字列としてホストへ渡す。
 
 type Send = (msg: object) => void;
+const TEXT_ENTRY_GAP = 8;
 
 export class TextInput {
   private open = false;
   private disposed = false;
+  private observer: ResizeObserver;
 
   constructor(
     private toggleButton: HTMLButtonElement,
@@ -16,11 +18,18 @@ export class TextInput {
     private input: HTMLInputElement,
     private closeButton: HTMLButtonElement,
     private send: Send,
-    private onOpen: () => void = () => {}
+    private onOpen: () => void = () => {},
+    private onLayout: (height: number) => void = () => {}
   ) {
     toggleButton.onclick = this.toggle;
     form.onsubmit = this.submit;
     closeButton.onclick = this.close;
+    this.observer = new ResizeObserver(() => this.reportLayout());
+    this.observer.observe(form);
+  }
+
+  private reportLayout(): void {
+    this.onLayout(this.open ? this.form.offsetHeight + TEXT_ENTRY_GAP : 0);
   }
 
   private toggle = (): void => {
@@ -34,6 +43,7 @@ export class TextInput {
     this.open = true;
     this.form.hidden = false;
     this.toggleButton.classList.add("active");
+    this.reportLayout();
     // ボタンのクリック処理の中でfocusするので、iOSでも標準キーボードが開く。
     this.input.focus({ preventScroll: true });
   }
@@ -54,6 +64,7 @@ export class TextInput {
     this.open = false;
     this.form.hidden = true;
     this.toggleButton.classList.remove("active");
+    this.reportLayout();
     this.input.blur();
   };
 
@@ -62,6 +73,8 @@ export class TextInput {
     this.toggleButton.onclick = null;
     this.form.onsubmit = null;
     this.closeButton.onclick = null;
+    this.observer.disconnect();
+    this.onLayout(0);
     this.close();
   }
 }

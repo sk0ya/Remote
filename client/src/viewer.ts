@@ -131,7 +131,7 @@ export function renderViewer(app: HTMLElement, hostId: string, onExit: () => voi
   const screen = attachScreenLayout(vroot, (occluded) => controller?.relayout(occluded));
   // 特殊キーバーの高さぶん、映像の表示領域を上に詰める。
   // バーは折り返しで高さが変わるので、実測した値を渡してもらう。
-  const onKbdLayout = (height: number) => screen.setKeyboardHeight(height);
+  const onKbdLayout = (height: number) => screen.setWebKeyboardHeight(height);
 
   // 画面の回転やアドレスバーの伸縮で何度も飛んでくるのでまとめる
   // (送出解像度が変わらない申告ならホスト側でも無視される)。
@@ -270,7 +270,8 @@ export function renderViewer(app: HTMLElement, hostId: string, onExit: () => voi
         textField,
         textClose,
         (msg) => ctl.send(msg),
-        () => keyboard?.close()
+        () => keyboard?.close(),
+        (height) => screen.setTextInputHeight(height)
       );
       textToggle.style.display = "";
       screen.apply(); // 新しいcontrollerに今の表示領域を教える

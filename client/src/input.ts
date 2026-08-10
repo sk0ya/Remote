@@ -108,17 +108,22 @@ function fitScale(box: Box, content: Box): number {
 // いつでも全体表示に戻せるので、見失うこともない。
 //
 // キーボードを閉じれば全体表示へ戻る。
-export function refit(box: Box, content: Box, fill: boolean): Transform {
+export function refit(box: Box, content: Box, fill: boolean, focus?: Pt): Transform {
   const contain = fitScale(box, content);
   if (!fill || !(contain > 0)) return { scale: 1, tx: 0, ty: 0 };
   // 領域を埋める倍率 (収める倍率との比が、そのまま拡大率になる)
   const cover = Math.max(box.w / content.w, box.h / content.h);
   const scale = Math.min(MAX_SCALE, Math.max(1, cover / contain));
-  // はみ出したぶんは中央を見せる (端に寄せると必ず片側が切れて見えない)
+  // はみ出したぶんはフォーカス位置を見せる。フォーカス位置が無いときは
+  // 中央を見せる (端に寄せると必ず片側が切れて見えない)。
+  const baseW = content.w * contain;
+  const baseH = content.h * contain;
+  const focusX = focus ? (box.w - baseW) / 2 + focus.x * baseW : box.w / 2;
+  const focusY = focus ? (box.h - baseH) / 2 + focus.y * baseH : box.h / 2;
   return {
     scale,
-    tx: clampPan((box.w * (1 - scale)) / 2, box.w, scale),
-    ty: clampPan((box.h * (1 - scale)) / 2, box.h, scale),
+    tx: clampPan(box.w / 2 - focusX * scale, box.w, scale),
+    ty: clampPan(box.h / 2 - focusY * scale, box.h, scale),
   };
 }
 
@@ -135,6 +140,8 @@ export class InputController {
   private scale = 1;
   private tx = 0;
   private ty = 0;
+  // キーボードを開いたときに見せる、直前にタップしたリモート画面上の位置。
+  private focus: Pt | null = null;
 
   // 直前の表示領域の大きさ。変わっていなければ置き直す必要がない。
   private box: Box;
@@ -185,14 +192,18 @@ export class InputController {
     const r = this.video.getBoundingClientRect();
     const vw = this.video.videoWidth;
     const vh = this.video.videoHeight;
-    if (!vw || !vh || r.width === 0) return null;
-    const s = Math.min(r.width / vw, r.height / vh);
+    if (!vw || !vh || r.width === 0 || !(this.scale > 0)) return null;
+    // getBoundingClientRect() は拡大・パン後の矩形なので、まず現在の
+    // transformを逆に戻してから object-fit:contain の中身を計算する。
+    const baseLeft = r.left - this.tx;
+    const baseTop = r.top - this.ty;
+    const baseW = r.width / this.scale;
+    const baseH = r.height / this.scale;
+    const s = Math.min(baseW / vw, baseH / vh);
     const dw = vw * s;
     const dh = vh * s;
-    const ox = r.left + (r.width - dw) / 2;
-    const oy = r.top + (r.height - dh) / 2;
-    const x = (clientX - ox) / dw;
-    const y = (clientY - oy) / dh;
+    const x = ((clientX - baseLeft) / this.scale - (baseW - dw) / 2) / dw;
+    const y = ((clientY - baseTop) / this.scale - (baseH - dh) / 2) / dh;
     if (x < 0 || x > 1 || y < 0 || y > 1) return null;
     return { x, y };
   }
@@ -201,6 +212,13 @@ export class InputController {
   private moveTo(clientX: number, clientY: number): void {
     const p = this.toNorm(clientX, clientY);
     if (p) this.outbox.move(p.x, p.y);
+  }
+
+  // キーボード表示時に見せる位置を、クリックの完了を待たずに記録する。
+  // pointerupがOSやブラウザに奪われても、入力を始めた場所は失わない。
+  private rememberFocus(clientX: number, clientY: number): void {
+    const p = this.toNorm(clientX, clientY);
+    if (p) this.focus = p;
   }
 
   private applyTransform(): void {
@@ -231,7 +249,7 @@ export class InputController {
     this.box = next;
     this.filling = fill;
     const content = { w: this.video.videoWidth, h: this.video.videoHeight };
-    const r = refit(next, content, fill);
+    const r = refit(next, content, fill, this.focus ?? undefined);
     this.scale = r.scale;
     this.tx = r.tx;
     this.ty = r.ty;
@@ -244,12 +262,14 @@ export class InputController {
 
     if (e.pointerType === "mouse") {
       e.preventDefault();
+      this.rememberFocus(e.clientX, e.clientY);
       this.moveTo(e.clientX, e.clientY);
       this.send({ t: "dn", b: e.button === 2 ? 2 : e.button === 1 ? 1 : 0 });
       return;
     }
 
     if (this.pointers.size === 1) {
+      this.rememberFocus(e.clientX, e.clientY);
       this.downAt = performance.now();
       this.startPt = { x: e.clientX, y: e.clientY };
       this.moved = false;
@@ -371,6 +391,7 @@ export class InputController {
     if (!this.moved && performance.now() - this.downAt < TAP_MS) {
       const p = this.toNorm(e.clientX, e.clientY);
       if (p) {
+        this.focus = p;
         this.send({ t: "mv", x: p.x, y: p.y });
         this.send({ t: "dn", b: 0 });
         this.send({ t: "up", b: 0 });

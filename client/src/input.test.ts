@@ -144,6 +144,20 @@ describe("refit", () => {
   it("ぴったり収まる形なら拡大しない", () => {
     expect(refit({ w: 1920, h: 1080 }, HD, true)).toEqual({ scale: 1, tx: 0, ty: 0 });
   });
+
+  it("フォーカス位置を表示領域の中央へ移動する", () => {
+    const r = refit({ w: 390, h: 423 }, HD, true, { x: 0.5, y: 0.8 });
+    expect(r.scale).toBeCloseTo(1.929);
+    // 中央のxはそのまま、下側のフォーカスに合わせて上へパンする。
+    expect(r.tx).toBeCloseTo(-181, 1);
+    expect(r.ty).toBeCloseTo(-323.2, 1);
+  });
+
+  it("端のフォーカスは映像の端を超えてパンしない", () => {
+    const r = refit({ w: 390, h: 423 }, HD, true, { x: 0, y: 0 });
+    expect(r.tx).toBe(0);
+    expect(r.ty).toBe(0);
+  });
 });
 
 // 際限なく動かせると映像を画面の外へ放り出せてしまい、真っ黒な画面から

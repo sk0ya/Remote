@@ -183,7 +183,7 @@ input.field {
 
 /* キーボードを出しているあいだは打つほうを使っている。56pxの丸は
    狭くなった映像を隠すだけなので引っ込める(閉じれば戻る)。 */
-.viewer.kbd-open .mic {
+.viewer.keyboard-open .mic {
   display: none;
 }
 
@@ -194,13 +194,13 @@ input.field {
   border-color: #3b6cf5;
 }
 
-/* スマホ標準キーボードの直上に出す入力欄。--kbd-bottom は visualViewport
-   から screen.ts が更新するので、iOS/Androidでもキーボードに隠れない。 */
+/* スマホ標準キーボードの直上に出す入力欄。--viewport-occlusion-bottom は
+   visualViewportからscreen.tsが更新するので、iOS/Androidでもキーボードに隠れない。 */
 .text-entry {
   position: fixed;
   left: 8px;
   right: 8px;
-  bottom: calc(var(--kbd-bottom, 0px) + 8px);
+  bottom: calc(var(--viewport-occlusion-bottom, 0px) + 8px);
   z-index: 12;
   display: flex;
   gap: 6px;
@@ -289,7 +289,7 @@ input.field {
   position: fixed;
   left: 0;
   right: 0;
-  bottom: var(--kbd-bottom, 0px);
+  bottom: var(--viewport-occlusion-bottom, 0px);
   z-index: 10;
   background: rgba(17, 19, 24, 0.92);
   /* 隙間はキーの幅から直接引かれる (10列だと4pxでも幅の1割)。
