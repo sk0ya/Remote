@@ -9,6 +9,7 @@ import { VoiceInput, voiceSupported } from "./voice";
 import { currentViewport } from "./viewport";
 import { attachScreenLayout } from "./screen";
 import { PROTOCOL_VERSION } from "./protocol";
+import { IceCandidateRelay } from "./ice";
 
 const ICE_SERVERS: RTCIceServer[] = [
   { urls: "stun:stun.cloudflare.com:3478" },
@@ -197,8 +198,26 @@ export function renderViewer(app: HTMLElement, hostId: string, onExit: () => voi
     authenticateCurrent = null;
     authenticating = false;
     pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
+    // answer送信前に集まった候補はいったん保持し、answer適用後は逐次送る。
+    // 固定時間でICE収集を打ち切ると、モバイル回線でSTUNが遅い場合に
+    // candidate 0件のanswerを送って接続不能になる。
+    const candidateRelay = new IceCandidateRelay((candidate) => {
+      ch.send({ t: "candidate", v: PROTOCOL_VERSION, candidate });
+    });
+    pc.onicecandidate = (ev) => {
+      if (!ev.candidate) return;
+      candidateRelay.add(ev.candidate.toJSON());
+    };
     pc.ontrack = (ev) => {
       video.srcObject = ev.streams[0] ?? new MediaStream([ev.track]);
+      video.play().catch(() => {
+        setStatus("映像の再生が端末に止められました — タップして再生", true);
+        st.onclick = () => {
+          video.play().then(() => setStatus("")).catch((e) => {
+            setStatus(`映像を再生できません: ${e}`, true);
+          });
+        };
+      });
     };
     pc.ondatachannel = (ev) => {
       if (ev.channel.label !== "input") return;
@@ -287,7 +306,6 @@ export function renderViewer(app: HTMLElement, hostId: string, onExit: () => voi
     };
     await pc.setRemoteDescription({ type: "offer", sdp });
     await pc.setLocalDescription(await pc.createAnswer());
-    await waitIceComplete(pc);
     const answerSDP = pc.localDescription!.sdp;
 
     // まずanswerだけを渡してP2P経路を確認する。ホストはこの段階では映像を送らず、
@@ -311,6 +329,7 @@ export function renderViewer(app: HTMLElement, hostId: string, onExit: () => voi
     if (!ch.send({ t: "answer", v: PROTOCOL_VERSION, sdp: answerSDP })) {
       throw new Error("接続が別のタブに奪われました");
     }
+    candidateRelay.markAnswerSent();
     setStatus("P2P経路を確認中...");
   }
 
@@ -457,22 +476,4 @@ export function renderViewer(app: HTMLElement, hostId: string, onExit: () => voi
   document.addEventListener("visibilitychange", onVisibility);
   window.addEventListener("resize", onResize);
   ch.connect();
-}
-
-function waitIceComplete(pc: RTCPeerConnection): Promise<void> {
-  if (pc.iceGatheringState === "complete") return Promise.resolve();
-  return new Promise((resolve) => {
-    const check = () => {
-      if (pc.iceGatheringState === "complete") {
-        pc.removeEventListener("icegatheringstatechange", check);
-        resolve();
-      }
-    };
-    pc.addEventListener("icegatheringstatechange", check);
-    // 保険: 5秒で打ち切り(集まった候補だけで送る)
-    setTimeout(() => {
-      pc.removeEventListener("icegatheringstatechange", check);
-      resolve();
-    }, 5000);
-  });
 }

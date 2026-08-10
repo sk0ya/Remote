@@ -39,6 +39,34 @@ type clientMsg struct {
 	Sig        string `json:"sig,omitempty"`
 	// 再接続チケットを使う場合はassertionの代わりにこのMACが載る
 	MAC string `json:"mac,omitempty"`
+	// Trickle ICE。answer適用後に集まったクライアント候補を逐次受け取る。
+	Candidate *iceCandidateMsg `json:"candidate,omitempty"`
+}
+
+type iceCandidateMsg struct {
+	Candidate        string  `json:"candidate"`
+	SDPMid           *string `json:"sdpMid,omitempty"`
+	SDPMLineIndex    *uint16 `json:"sdpMLineIndex,omitempty"`
+	UsernameFragment *string `json:"usernameFragment,omitempty"`
+}
+
+type iceCandidateAdder interface {
+	AddICECandidate(string, *string, *uint16, *string) error
+}
+
+func applyICECandidate(version int, candidate *iceCandidateMsg, target iceCandidateAdder) error {
+	if version != protocolVersion {
+		return fmt.Errorf("非対応プロトコル v%d", version)
+	}
+	if candidate == nil || candidate.Candidate == "" {
+		return errors.New("ICE候補が空です")
+	}
+	return target.AddICECandidate(
+		candidate.Candidate,
+		candidate.SDPMid,
+		candidate.SDPMLineIndex,
+		candidate.UsernameFragment,
+	)
 }
 
 type app struct {
@@ -380,6 +408,20 @@ func (a *app) onMessage(msg json.RawMessage, peerIP string) {
 			return
 		}
 		log.Printf("session: answer適用 — P2P疎通確認待ち")
+
+	case "candidate":
+		if m.Version != protocolVersion || m.Candidate == nil {
+			return
+		}
+		a.sessMu.Lock()
+		p := a.pending
+		a.sessMu.Unlock()
+		if p == nil || p.answer == "" {
+			return
+		}
+		if err := applyICECandidate(m.Version, m.Candidate, p.sess); err != nil {
+			log.Printf("session: クライアントICE候補の追加失敗: %v", err)
+		}
 
 	case "auth":
 		if m.Version != protocolVersion {

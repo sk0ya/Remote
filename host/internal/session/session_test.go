@@ -2,11 +2,14 @@ package session
 
 import (
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/pion/rtp"
 	"github.com/pion/rtp/codecs"
+	"github.com/pion/webrtc/v4"
 	"github.com/pion/webrtc/v4/pkg/media"
 
 	hostmedia "remotehost/internal/media"
@@ -171,5 +174,143 @@ func TestDiagnoseICEFailure(t *testing.T) {
 	}
 	if got := diagnoseICEFailure(from(v4), from(v4)); !strings.Contains(got, "NAT/ファイアウォール") {
 		t.Errorf("同一IP方式での疎通失敗診断 = %q", got)
+	}
+}
+
+func TestAuthorizationGateRejectsUntilAuthorized(t *testing.T) {
+	var g authorizationGate
+	if g.allow() {
+		t.Fatal("認証前の入力を許可した")
+	}
+	changed, dcOpened := g.authorize()
+	if !changed || dcOpened || !g.allow() {
+		t.Fatalf("認証後の状態が不正: changed=%v dcOpened=%v allow=%v", changed, dcOpened, g.allow())
+	}
+	if changed, _ := g.authorize(); changed {
+		t.Fatal("二重認証で再度解禁した")
+	}
+}
+
+func TestAuthorizationGateHandlesEitherEventOrder(t *testing.T) {
+	var openedFirst authorizationGate
+	if openedFirst.markDCOpen() {
+		t.Fatal("認証前のDataChannelを解禁した")
+	}
+	changed, dcOpened := openedFirst.authorize()
+	if !changed || !dcOpened {
+		t.Fatal("DataChannelオープン済みなのに認証時の解禁通知がない")
+	}
+
+	var authorizedFirst authorizationGate
+	changed, dcOpened = authorizedFirst.authorize()
+	if !changed || dcOpened {
+		t.Fatal("未オープンのDataChannelへ解禁通知しようとした")
+	}
+	if !authorizedFirst.markDCOpen() {
+		t.Fatal("認証済みなのにDataChannelオープン時の解禁通知がない")
+	}
+}
+
+func TestAuthorizationGateConcurrentAuthorizeOnlyChangesOnce(t *testing.T) {
+	var g authorizationGate
+	var changed atomic.Int32
+	var wg sync.WaitGroup
+	for i := 0; i < 100; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if first, _ := g.authorize(); first {
+				changed.Add(1)
+			}
+			_ = g.allow()
+			_ = g.markDCOpen()
+		}()
+	}
+	wg.Wait()
+	if got := changed.Load(); got != 1 {
+		t.Fatalf("並行認証で解禁が%d回発生", got)
+	}
+	if !g.allow() {
+		t.Fatal("並行処理後に認証状態が失われた")
+	}
+}
+
+func TestH264SampleReachesRemotePeerAsRTP(t *testing.T) {
+	senderPC, err := webrtc.NewPeerConnection(webrtc.Configuration{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer senderPC.Close()
+	receiverPC, err := webrtc.NewPeerConnection(webrtc.Configuration{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer receiverPC.Close()
+
+	track, err := webrtc.NewTrackLocalStaticSample(
+		webrtc.RTPCodecCapability{MimeType: webrtc.MimeTypeH264},
+		"video", "test-screen",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rtpSender, err := senderPC.AddTrack(track)
+	if err != nil {
+		t.Fatal(err)
+	}
+	go drainRTCP(rtpSender)
+
+	received := make(chan struct{}, 1)
+	receiverPC.OnTrack(func(remote *webrtc.TrackRemote, _ *webrtc.RTPReceiver) {
+		if _, _, err := remote.ReadRTP(); err == nil {
+			received <- struct{}{}
+		}
+	})
+
+	offer, err := senderPC.CreateOffer(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	senderGathered := webrtc.GatheringCompletePromise(senderPC)
+	if err := senderPC.SetLocalDescription(offer); err != nil {
+		t.Fatal(err)
+	}
+	<-senderGathered
+	if err := receiverPC.SetRemoteDescription(*senderPC.LocalDescription()); err != nil {
+		t.Fatal(err)
+	}
+	answer, err := receiverPC.CreateAnswer(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	receiverGathered := webrtc.GatheringCompletePromise(receiverPC)
+	if err := receiverPC.SetLocalDescription(answer); err != nil {
+		t.Fatal(err)
+	}
+	<-receiverGathered
+	if err := senderPC.SetRemoteDescription(*receiverPC.LocalDescription()); err != nil {
+		t.Fatal(err)
+	}
+
+	// Annex-B形式のIDR NAL。接続完了前のWriteSampleはbindingが無く捨てられるため、
+	// RTPが届くまで短い間隔で投入する。
+	sample := hostmedia.Sample{
+		Data: []byte{0x00, 0x00, 0x00, 0x01, 0x65, 0x88, 0x84, 0x21},
+		Gap:  33 * time.Millisecond,
+	}
+	ticker := time.NewTicker(20 * time.Millisecond)
+	defer ticker.Stop()
+	timeout := time.After(5 * time.Second)
+	for {
+		select {
+		case <-received:
+			return
+		case <-ticker.C:
+			if err := writeSample(track, sample); err != nil {
+				t.Fatal(err)
+			}
+		case <-timeout:
+			t.Fatal("H.264サンプルをRTPとして受信できなかった")
+		}
 	}
 }

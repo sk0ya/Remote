@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/pion/interceptor"
 	"github.com/pion/webrtc/v4"
 	"github.com/pion/webrtc/v4/pkg/media"
 
@@ -31,9 +32,7 @@ type Session struct {
 	mediaMu     sync.Mutex
 	cancelMedia context.CancelFunc
 	mediaOpts   hostmedia.Options
-	authMu      sync.Mutex
-	authorized  bool
-	dcOpened    bool
+	auth        authorizationGate
 	// クライアントが映像を見ているか。スマホがバックグラウンドに回ったり
 	// 画面が消えたりしているあいだは false になり、キャプチャを止める。
 	active    bool
@@ -88,10 +87,14 @@ func New(ctx context.Context, mediaOpts hostmedia.Options) (*Session, string, er
 		pc.Close()
 		return nil, "", err
 	}
-	if _, err := pc.AddTrack(s.track); err != nil {
+	rtpSender, err := pc.AddTrack(s.track)
+	if err != nil {
 		pc.Close()
 		return nil, "", err
 	}
+	// RTCPを読まないと受信側のフィードバックが詰まり、NACK等のinterceptorも
+	// 機能しない。映像送信中は必ず排出し、PeerConnection終了時にReadが戻る。
+	go drainRTCP(rtpSender)
 
 	dc, err := pc.CreateDataChannel("input", nil)
 	if err != nil {
@@ -100,19 +103,12 @@ func New(ctx context.Context, mediaOpts hostmedia.Options) (*Session, string, er
 	}
 	s.dc = dc
 	dc.OnOpen(func() {
-		s.authMu.Lock()
-		s.dcOpened = true
-		authorized := s.authorized
-		s.authMu.Unlock()
-		if authorized && s.OnDCOpen != nil {
+		if s.auth.markDCOpen() && s.OnDCOpen != nil {
 			s.OnDCOpen()
 		}
 	})
 	dc.OnMessage(func(msg webrtc.DataChannelMessage) {
-		s.authMu.Lock()
-		authorized := s.authorized
-		s.authMu.Unlock()
-		if !authorized {
+		if !s.auth.allow() {
 			return
 		}
 		if !msg.IsString {
@@ -134,10 +130,7 @@ func New(ctx context.Context, mediaOpts hostmedia.Options) (*Session, string, er
 		switch state {
 		case webrtc.PeerConnectionStateConnected:
 			s.logSelectedPair()
-			s.authMu.Lock()
-			authorized := s.authorized
-			s.authMu.Unlock()
-			if authorized {
+			if s.auth.allow() {
 				s.startMedia()
 			}
 		case webrtc.PeerConnectionStateFailed, webrtc.PeerConnectionStateClosed,
@@ -256,17 +249,27 @@ func (s *Session) HandleAnswer(sdp string) error {
 	})
 }
 
+// AddICECandidate はanswer送信後に集まったクライアント候補を追加する。
+func (s *Session) AddICECandidate(candidate string, sdpMid *string, sdpMLineIndex *uint16, usernameFragment *string) error {
+	if candidate == "" {
+		return nil
+	}
+	log.Printf("session: クライアントICE候補を追加")
+	return s.pc.AddICECandidate(webrtc.ICECandidateInit{
+		Candidate:        candidate,
+		SDPMid:           sdpMid,
+		SDPMLineIndex:    sdpMLineIndex,
+		UsernameFragment: usernameFragment,
+	})
+}
+
 // Authorize はP2P経路の確立後、パスキーまたは再接続チケットの検証に
 // 成功した時だけ映像と入力を解禁する。接続確認中のDataChannel入力は捨てる。
 func (s *Session) Authorize() {
-	s.authMu.Lock()
-	if s.authorized {
-		s.authMu.Unlock()
+	changed, dcOpened := s.auth.authorize()
+	if !changed {
 		return
 	}
-	s.authorized = true
-	dcOpened := s.dcOpened
-	s.authMu.Unlock()
 
 	if s.pc.ConnectionState() == webrtc.PeerConnectionStateConnected {
 		s.startMedia()
@@ -274,6 +277,40 @@ func (s *Session) Authorize() {
 	if dcOpened && s.OnDCOpen != nil {
 		s.OnDCOpen()
 	}
+}
+
+// authorizationGate は認証とDataChannelオープンのどちらが先でも、
+// 認証前の入力を拒否し、解禁通知を一度だけ行える状態機械。
+type authorizationGate struct {
+	mu         sync.Mutex
+	authorized bool
+	dcOpened   bool
+}
+
+func (g *authorizationGate) allow() bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.authorized
+}
+
+// markDCOpen は既に認証済みなら、その場で解禁通知が必要なことを返す。
+func (g *authorizationGate) markDCOpen() bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.dcOpened = true
+	return g.authorized
+}
+
+// authorize は初回だけchanged=trueを返す。dcOpenedは、認証完了時点で
+// DataChannelへの解禁通知も必要かを示す。
+func (g *authorizationGate) authorize() (changed, dcOpened bool) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.authorized {
+		return false, g.dcOpened
+	}
+	g.authorized = true
+	return true, g.dcOpened
 }
 
 func (s *Session) logSelectedPair() {
@@ -306,6 +343,7 @@ func (s *Session) startMedia() {
 		}
 	}()
 	go func() {
+		first := true
 		for {
 			select {
 			case <-ctx.Done():
@@ -315,9 +353,26 @@ func (s *Session) startMedia() {
 					log.Printf("session: WriteSample失敗: %v", err)
 					return
 				}
+				if first && len(sample.Data) > 0 {
+					first = false
+					log.Printf("session: 映像RTPへ最初のフレーム投入 (%d bytes)", len(sample.Data))
+				}
 			}
 		}
 	}()
+}
+
+type rtcpReader interface {
+	Read([]byte) (int, interceptor.Attributes, error)
+}
+
+func drainRTCP(reader rtcpReader) {
+	buf := make([]byte, 1500)
+	for {
+		if _, _, err := reader.Read(buf); err != nil {
+			return
+		}
+	}
 }
 
 // sampleWriter は *webrtc.TrackLocalStaticSample を差し替えられるようにするためだけの型。

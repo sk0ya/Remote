@@ -46,7 +46,10 @@ cd host; go build -o remotehost.exe ./cmd/remotehost; ./remotehost.exe
 ホスト起動時にタスクトレイに常駐し、未ペアリングならペアリングQRページが開く。
 スマホをPCと同じWi-Fiにつなぎ、QRを読んでパスワードを入力し、続けて出るパスキーの作成を承認すればペアリング完了。
 
-- テスト: `cd client; npm test`(ロジックのユニットテスト + スマホ表示のレイアウト検証)
+- テスト:
+  - `cd client; npm test` — 入力・Trickle ICEのユニットテスト + スマホ表示のレイアウト検証
+  - `cd host; go test ./...` — 認証、ICE候補、メディア、入力などWindowsホスト全体
+  - `cd signaling; npm run typecheck; npm test` — Workers実行環境内でDurable ObjectとWebSocket中継を検証
   - レイアウト検証(`npm run test:layout`)はヘッドレスChromeに実物のCSSと部品を載せ、
     縦持ち/横持ちでソフトキーボードを出した状態を作って「映像が隠れて見えなくなっていないか」
     「見た目の大きさが変わっていないか」「特殊キーバーがキーボードに潜っていないか」を測る。

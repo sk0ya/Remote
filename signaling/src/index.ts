@@ -3,6 +3,8 @@
 // 2本のWebSocket間でJSONメッセージを素通しする。認証・秘密情報は
 // 一切持たず、各接続の観測グローバルIPを付与するだけ。
 
+import { DurableObject } from "cloudflare:workers";
+
 export interface Env {
   ROOM: DurableObjectNamespace;
 }
@@ -42,9 +44,10 @@ const PONG = "pong";
 // WebSocket.READY_STATE_OPEN 相当。閉じかけのソケットを避けるのに使う。
 const WS_OPEN = 1;
 
-export class Room implements DurableObject {
-  constructor(private state: DurableObjectState) {
-    this.state.setWebSocketAutoResponse(new WebSocketRequestResponsePair(PING, PONG));
+export class Room extends DurableObject<Env> {
+  constructor(ctx: DurableObjectState, env: Env) {
+    super(ctx, env);
+    this.ctx.setWebSocketAutoResponse(new WebSocketRequestResponsePair(PING, PONG));
   }
 
   async fetch(request: Request): Promise<Response> {
@@ -58,7 +61,7 @@ export class Room implements DurableObject {
     // 同一ロールの既存接続は置き換える(host再起動・クライアント再読込対応)。
     // 印を付けてから閉じる: closeイベントは新しい接続が入室した後に届くことがあり、
     // そのまま peer-left を流すと繋がったばかりの相手を切断扱いにしてしまう。
-    for (const ws of this.state.getWebSockets(role)) {
+    for (const ws of this.ctx.getWebSockets(role)) {
       const att = ws.deserializeAttachment() as Attachment | null;
       if (att) ws.serializeAttachment({ ...att, replaced: true } satisfies Attachment);
       ws.close(4000, "replaced");
@@ -66,7 +69,7 @@ export class Room implements DurableObject {
 
     const pair = new WebSocketPair();
     const [clientEnd, serverEnd] = Object.values(pair) as [WebSocket, WebSocket];
-    this.state.acceptWebSocket(serverEnd, [role]);
+    this.ctx.acceptWebSocket(serverEnd, [role]);
     serverEnd.serializeAttachment({ role, ip } satisfies Attachment);
 
     const peer = this.peer(role);
@@ -79,7 +82,7 @@ export class Room implements DurableObject {
   // そのロールの「生きている」ソケット。蹴った直後の古いソケットは close が
   // 完了するまで一覧に残るので、置き換え済みと閉じかけを除いて数える。
   private live(role: Role): WebSocket[] {
-    return this.state.getWebSockets(role).filter((ws) => {
+    return this.ctx.getWebSockets(role).filter((ws) => {
       const att = ws.deserializeAttachment() as Attachment | null;
       return !att?.replaced && ws.readyState === WS_OPEN;
     });
