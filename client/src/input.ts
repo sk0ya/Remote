@@ -9,7 +9,7 @@
 //   ピンチ           → 表示ズーム
 // マウス(開発用PC)はそのまま対応するボタン・ホイールを送る。
 
-interface Pt {
+export interface Pt {
   x: number;
   y: number;
 }
@@ -84,6 +84,41 @@ export interface Transform {
   ty: number;
 }
 
+// getBoundingClientRect() が返す矩形のうち、ここで使うぶん。
+export interface Rect {
+  left: number;
+  top: number;
+  width: number;
+  height: number;
+}
+
+// 画面座標 → 映像の中の正規化座標(0..1)。映像の外ならnull。
+//
+// rect は getBoundingClientRect() の値、つまり拡大・パンを適用したあとの矩形。
+// scaleで割ればレイアウト上の大きさに戻り、パン量(tx,ty)はrect.left/topに
+// すでに入っているので引き直してはいけない。以前はここでtxを引き戻していて、
+// 「パンしていなかったらそこに何があったか」の座標をホストへ送っていた
+// (ズームして動かしたあとにタップすると、その動かしたぶんだけずれる)。
+export function toNorm(
+  clientX: number,
+  clientY: number,
+  rect: Rect,
+  content: Box,
+  scale: number
+): Pt | null {
+  if (!(content.w > 0) || !(content.h > 0) || !(rect.width > 0) || !(scale > 0)) return null;
+  // 変換前(レイアウト上)の大きさに戻してから object-fit:contain の中身を計算する
+  const baseW = rect.width / scale;
+  const baseH = rect.height / scale;
+  const s = Math.min(baseW / content.w, baseH / content.h);
+  const dw = content.w * s;
+  const dh = content.h * s;
+  const x = ((clientX - rect.left) / scale - (baseW - dw) / 2) / dw;
+  const y = ((clientY - rect.top) / scale - (baseH - dh) / 2) / dh;
+  if (x < 0 || x > 1 || y < 0 || y > 1) return null;
+  return { x, y };
+}
+
 // 拡大時の移動量の上限。映像が表示領域からはみ出したぶんまでしか動かせない。
 // 制限しないと画面外まで放り出せてしまい、真っ黒になって戻し方が分からなくなる。
 export function clampPan(t: number, size: number, scale: number): number {
@@ -136,6 +171,11 @@ export class InputController {
   private longPressTimer = 0;
   private twoFingerStart: { mid: Pt; dist: number; time: number } | null = null;
   private twoFingerMoved = false;
+  // この操作のあいだに2本目の指が触れたか。
+  // 2本指の処理は1本目を離した時点で終わるので、残った指を離したぶんが
+  // 1本指タップとして拾われる。ピンチやスクロールのあとに、指を離した場所を
+  // 勝手にクリックしてしまうので、指が1本に戻るまでタップとは見なさない。
+  private multi = false;
   // 表示ズーム状態
   private scale = 1;
   private tx = 0;
@@ -189,23 +229,13 @@ export class InputController {
 
   // 画面座標 → ホスト画面の正規化座標(0..1)。映像の外ならnull。
   private toNorm(clientX: number, clientY: number): Pt | null {
-    const r = this.video.getBoundingClientRect();
-    const vw = this.video.videoWidth;
-    const vh = this.video.videoHeight;
-    if (!vw || !vh || r.width === 0 || !(this.scale > 0)) return null;
-    // getBoundingClientRect() は拡大・パン後の矩形なので、まず現在の
-    // transformを逆に戻してから object-fit:contain の中身を計算する。
-    const baseLeft = r.left - this.tx;
-    const baseTop = r.top - this.ty;
-    const baseW = r.width / this.scale;
-    const baseH = r.height / this.scale;
-    const s = Math.min(baseW / vw, baseH / vh);
-    const dw = vw * s;
-    const dh = vh * s;
-    const x = ((clientX - baseLeft) / this.scale - (baseW - dw) / 2) / dw;
-    const y = ((clientY - baseTop) / this.scale - (baseH - dh) / 2) / dh;
-    if (x < 0 || x > 1 || y < 0 || y > 1) return null;
-    return { x, y };
+    return toNorm(
+      clientX,
+      clientY,
+      this.video.getBoundingClientRect(),
+      { w: this.video.videoWidth, h: this.video.videoHeight },
+      this.scale
+    );
   }
 
   // 移動は次の描画フレームまでまとめる (1イベント1パケットにしない)。
@@ -274,6 +304,7 @@ export class InputController {
       this.startPt = { x: e.clientX, y: e.clientY };
       this.moved = false;
       this.dragging = false;
+      this.multi = false;
       this.longPressTimer = window.setTimeout(() => {
         // 長押し: 左ボタンを押し込んでドラッグ開始
         this.dragging = true;
@@ -282,6 +313,7 @@ export class InputController {
         navigator.vibrate?.(30);
       }, LONG_PRESS_MS);
     } else if (this.pointers.size === 2) {
+      this.multi = true;
       clearTimeout(this.longPressTimer);
       if (this.dragging) {
         this.send({ t: "up", b: 0 });
@@ -388,7 +420,7 @@ export class InputController {
     }
 
     // 1本指タップ → 左クリック
-    if (!this.moved && performance.now() - this.downAt < TAP_MS) {
+    if (!this.multi && !this.moved && performance.now() - this.downAt < TAP_MS) {
       const p = this.toNorm(e.clientX, e.clientY);
       if (p) {
         this.focus = p;

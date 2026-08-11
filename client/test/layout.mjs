@@ -178,6 +178,66 @@ async function run(page, name, width, height) {
   await page.evaluate("window.test.closeText()");
   await page.evaluate(`window.test.setVisibleHeight(${height})`);
   await new Promise((r) => setTimeout(r, 100));
+
+  // ピンチで拡大して動かしたあと、指の下にあるものの位置がそのままホストへ
+  // 送られること。以前は動かしたぶんだけずれ、「拡大していなかったらそこに
+  // 何があったか」の場所がクリックされていた (拡大するほど大きく外れる)。
+  // 変換後の座標が絡むのでjsdomでは再現できず、ここで実物を触って測る。
+  await page.evaluate("window.test.takeDcSent()"); // ここまでの操作を捨てる
+  await page.evaluate(`window.test.pinch(${width / 2}, ${height / 2}, 100, 250)`);
+  const zoomScale = await page.evaluate("window.test.videoScale()");
+  ok(zoomScale > 1.5, `${name}: ピンチで拡大できない`, `${zoomScale.toFixed(2)}倍`);
+  // 2本指の操作そのものはクリックにしないこと。2本指の処理は1本目を離した
+  // 時点で終わるので、残った指を離したぶんが1本指タップとして拾われていた
+  // (ピンチのたびに、指を離した場所が勝手にクリックされる)。
+  const pinched = await page.evaluate("JSON.stringify(window.test.takeDcSent())").then(JSON.parse);
+  ok(
+    !pinched.some((m) => m.t === "dn" || m.t === "up"),
+    `${name}: ピンチが勝手にクリックを送る`,
+    JSON.stringify(pinched)
+  );
+  for (const p of [
+    { x: 0.5, y: 0.5 },
+    { x: 0.44, y: 0.56 },
+    { x: 0.57, y: 0.47 },
+  ]) {
+    await page.evaluate(`window.test.tapScreen(${p.x}, ${p.y})`);
+    const msgs = await page.evaluate("JSON.stringify(window.test.takeDcSent())").then(JSON.parse);
+    const mv = msgs.find((m) => m.t === "mv");
+    ok(mv, `${name}: 拡大中のタップがホストへ届かない`, JSON.stringify(msgs));
+    if (mv) {
+      // 1/1000単位で比べる (見えている位置と送った位置の差)
+      near(mv.x * 1000, p.x * 1000, 5, `${name}: 拡大中のタップの横位置がずれる`);
+      near(mv.y * 1000, p.y * 1000, 5, `${name}: 拡大中のタップの縦位置がずれる`);
+    }
+  }
+  // つまみ縮めて全体表示へ戻す (これ以降は等倍が前提)
+  await page.evaluate(`window.test.pinch(${width / 2}, ${height / 2}, 250, 60)`);
+  const unpinched = await page
+    .evaluate("JSON.stringify(window.test.takeDcSent())")
+    .then(JSON.parse);
+  ok(
+    !unpinched.some((m) => m.t === "dn" || m.t === "up"),
+    `${name}: 縮めるだけでクリックが飛ぶ`,
+    JSON.stringify(unpinched)
+  );
+  const unzoomed = await page.evaluate("JSON.stringify(window.test.measure())").then(JSON.parse);
+  ok(unzoomed.transform === "none", `${name}: 縮めても拡大が残る`, unzoomed.transform);
+
+  // 2本指を動かさずに離せば右クリック。誤クリックを止めたせいでこちらまで
+  // 消えていないこと (2本指タップは右クリックの唯一の出し方)。
+  await page.evaluate(`window.test.pinch(${width / 2}, ${height / 2}, 100, 100)`);
+  const twoTap = await page.evaluate("JSON.stringify(window.test.takeDcSent())").then(JSON.parse);
+  ok(
+    JSON.stringify(twoTap.filter((m) => m.t !== "mv")) ===
+      JSON.stringify([
+        { t: "dn", b: 2 },
+        { t: "up", b: 2 },
+      ]),
+    `${name}: 2本指タップが右クリックにならない`,
+    JSON.stringify(twoTap)
+  );
+
   // 画面下側の入力欄をタップしてからキーボードを開く。中央固定ではなく、
   // このフォーカス位置が残りの表示領域へ移動することを検証する。
   await page.evaluate(`window.test.tapScreen(${focus.x}, ${focus.y})`);

@@ -44,7 +44,16 @@ void video.play().catch(() => {});
 // 音声対応端末と同じ状態にする (キーボードを開いたら退くかを見るため)
 (document.getElementById("mic") as HTMLElement).style.display = "";
 
-const dc = { readyState: "open", bufferedAmount: 0, send() {} } as unknown as RTCDataChannel;
+// ホストへ実際に飛ぶ操作メッセージ (タップ位置の検証に使う)。
+// キーボード側の sent とは経路が違うので分けて溜める。
+const dcSent: object[] = [];
+const dc = {
+  readyState: "open",
+  bufferedAmount: 0,
+  send(data: unknown) {
+    if (typeof data === "string") dcSent.push(JSON.parse(data));
+  },
+} as unknown as RTCDataChannel;
 const controller = new InputController(video, surface, dc);
 const vv = new FakeViewport();
 const screen = attachScreenLayout(
@@ -177,6 +186,31 @@ Object.assign(window, {
       surface.dispatchEvent(new PointerEvent("pointerdown", init));
       surface.dispatchEvent(new PointerEvent("pointerup", init));
     },
+    // 2本指のピンチ。(cx,cy)を中心に、指の間隔を from → to へ変える。
+    pinch(cx: number, cy: number, from: number, to: number) {
+      const touch = (id: number, x: number, y: number) => ({
+        bubbles: true,
+        cancelable: true,
+        pointerId: id,
+        pointerType: "touch",
+        clientX: x,
+        clientY: y,
+      });
+      const at = (type: string, id: number, d: number, side: number) =>
+        surface.dispatchEvent(new PointerEvent(type, touch(id, cx + (side * d) / 2, cy)));
+      at("pointerdown", 1, from, -1);
+      at("pointerdown", 2, from, 1);
+      // 途中を数回に分けて動かす (実際の指と同じく少しずつ広がる)
+      for (let i = 1; i <= 4; i++) {
+        const d = from + ((to - from) * i) / 4;
+        at("pointermove", 1, d, -1);
+        at("pointermove", 2, d, 1);
+      }
+      at("pointerup", 1, to, -1);
+      at("pointerup", 2, to, 1);
+    },
+    // 映像の拡大率 (ピンチが効いたかの確認に使う)
+    videoScale: () => new DOMMatrix(getComputedStyle(video).transform).a,
     transformedScreenPoint,
     // 押しっぱなし・離すを別々に起こす (連射の検証に使う)
     keyDown: (label: string) => fire(findKey(label), "pointerdown"),
@@ -188,6 +222,10 @@ Object.assign(window, {
         .join(""),
     takeSent() {
       return sent.splice(0, sent.length);
+    },
+    // ホストへ飛んだ操作メッセージ (mv/dn/up など)
+    takeDcSent() {
+      return dcSent.splice(0, dcSent.length);
     },
     // 自動再生が止められた状態を作る
     showPlayGate(on: boolean) {

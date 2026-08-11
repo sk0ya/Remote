@@ -1,5 +1,6 @@
 import { describe, it, expect, vi } from "vitest";
-import { Outbox, refit, clampPan } from "./input";
+import { Outbox, refit, clampPan, toNorm } from "./input";
+import type { Box, Pt, Rect } from "./input";
 
 // 送信を記録し、rAF相当のスケジュールを手動で進められるOutboxを作る。
 function makeOutbox() {
@@ -157,6 +158,98 @@ describe("refit", () => {
     const r = refit({ w: 390, h: 423 }, HD, true, { x: 0, y: 0 });
     expect(r.tx).toBe(0);
     expect(r.ty).toBe(0);
+  });
+});
+
+// 指で触った場所を、ホスト画面のどこかへ翻訳する。ここがずれると、
+// 見えている場所と違うところがクリックされる。
+describe("toNorm", () => {
+  // 縦持ちのスマホに16:9のデスクトップを収めた状態。
+  // 横は390pxいっぱい、縦は219.375pxの帯で、上下に312.3125pxずつ余白が出る。
+  const BOX = { w: 390, h: 844 };
+  const LETTERBOX = 312.3125;
+
+  // transformを適用したあとの矩形 (getBoundingClientRect()が返すもの)。
+  // 映像はビューア全体を占めるので、レイアウト上の左上は0,0。
+  function rectOf(t: { scale: number; tx: number; ty: number }): Rect {
+    return { left: t.tx, top: t.ty, width: BOX.w * t.scale, height: BOX.h * t.scale };
+  }
+
+  // 正規化座標が実際に画面のどこに見えているか。toNormとは別の式で出す
+  // (拡大しても余白との比は変わらないので、変換後の矩形だけで完結する)。
+  function place(p: Pt, rect: Rect, content: Box): Pt {
+    const s = Math.min(rect.width / content.w, rect.height / content.h);
+    return {
+      x: rect.left + (rect.width - content.w * s) / 2 + content.w * s * p.x,
+      y: rect.top + (rect.height - content.h * s) / 2 + content.h * s * p.y,
+    };
+  }
+
+  it("等倍では余白を除いた中身の位置を返す", () => {
+    const r = rectOf({ scale: 1, tx: 0, ty: 0 });
+    expect(toNorm(195, 422, r, HD, 1)).toEqual({ x: 0.5, y: 0.5 });
+    expect(toNorm(0, LETTERBOX, r, HD, 1)).toEqual({ x: 0, y: 0 });
+    expect(toNorm(390, 844 - LETTERBOX, r, HD, 1)).toEqual({ x: 1, y: 1 });
+  });
+
+  it("上下の余白を触っても映像の外として弾く", () => {
+    const r = rectOf({ scale: 1, tx: 0, ty: 0 });
+    expect(toNorm(195, LETTERBOX - 1, r, HD, 1)).toBeNull();
+    expect(toNorm(195, 844 - LETTERBOX + 1, r, HD, 1)).toBeNull();
+    expect(toNorm(-1, 422, r, HD, 1)).toBeNull();
+    expect(toNorm(391, 422, r, HD, 1)).toBeNull();
+  });
+
+  // 以前はここでパン量を引き戻しており、「動かしていなかったら
+  // そこに何があったか」を送っていた (下の例では0.5ではなく0.25)。
+  it("ズームして動かしたあとも、指の下にあるものの位置を返す", () => {
+    const t = { scale: 2, tx: -195, ty: -200 };
+    const r = rectOf(t);
+    // 中央(195,644)には、2倍に拡大して左へ195px動かした結果、映像の中央が来ている
+    const p = toNorm(195, 644, r, HD, t.scale)!;
+    expect(p.x).toBeCloseTo(0.5, 6);
+    expect(p.y).toBeCloseTo(0.5, 6);
+  });
+
+  it("拡大して画面の外へ出た端は、そのまま映像の端として扱う", () => {
+    const t = { scale: 2, tx: -195, ty: -200 };
+    const r = rectOf(t);
+    expect(toNorm(-195, 644, r, HD, t.scale)!.x).toBeCloseTo(0, 6); // 左端は画面外
+    expect(toNorm(-196, 644, r, HD, t.scale)).toBeNull(); // その外は映像ではない
+  });
+
+  // どのズーム・位置でも「見えている場所」と「送る座標」が一致すること。
+  it("見えている位置から逆算した座標が元に戻る", () => {
+    const transforms = [
+      { scale: 1, tx: 0, ty: 0 },
+      { scale: 2, tx: -195, ty: -200 },
+      { scale: 3.5, tx: -700, ty: -1200 },
+      { scale: 1.929, tx: -181, ty: -196.3 }, // キーボードを開いて埋めた状態
+    ];
+    const points = [
+      { x: 0.5, y: 0.5 },
+      { x: 0.1, y: 0.9 },
+      { x: 0.83, y: 0.27 },
+    ];
+    for (const t of transforms) {
+      const r = rectOf(t);
+      for (const want of points) {
+        const screen = place(want, r, HD);
+        const got = toNorm(screen.x, screen.y, r, HD, t.scale);
+        expect(got, `scale=${t.scale} ${JSON.stringify(want)}`).not.toBeNull();
+        expect(got!.x).toBeCloseTo(want.x, 6);
+        expect(got!.y).toBeCloseTo(want.y, 6);
+      }
+    }
+  });
+
+  // 映像がまだ届いていない・領域が潰れている間は基準が無い。
+  // 0除算の結果を座標として送るとカーソルが飛ぶ。
+  it("基準が定まらないうちは何も返さない", () => {
+    const r = rectOf({ scale: 1, tx: 0, ty: 0 });
+    expect(toNorm(195, 422, r, { w: 0, h: 0 }, 1)).toBeNull();
+    expect(toNorm(195, 422, { left: 0, top: 0, width: 0, height: 0 }, HD, 1)).toBeNull();
+    expect(toNorm(195, 422, r, HD, 0)).toBeNull();
   });
 });
 
