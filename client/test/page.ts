@@ -8,6 +8,7 @@
 //     レターボックスの計算は実物と同じ経路を通る。
 import { VIEWER_HTML } from "../src/viewer";
 import { VirtualKeyboard } from "../src/keyboard";
+import { MousePad } from "../src/mouse";
 import { InputController } from "../src/input";
 import { TextInput } from "../src/text";
 import { attachScreenLayout } from "../src/screen";
@@ -69,6 +70,13 @@ const kbd = new VirtualKeyboard(
   (h) => screen.setWebKeyboardHeight(h),
   true
 );
+// マウス操作パネル。キーボードの後ろに置く (実物と同じ並び順)。
+const mouse = new MousePad(
+  vroot,
+  (m) => controller.send(m), // 実物と同じくOutbox経由でホストへ出す
+  (h) => screen.setMousePadHeight(h),
+  (open) => controller.setCursorOnly(open)
+);
 const textToggle = document.getElementById("text-toggle") as HTMLButtonElement;
 const textEntry = document.getElementById("text-entry") as HTMLFormElement;
 const textField = document.getElementById("text-field") as HTMLInputElement;
@@ -86,7 +94,7 @@ textToggle.style.display = "";
 screen.apply(); // 実物も接続時にここまでやる
 
 function findKey(label: string): Element {
-  const btn = [...document.querySelectorAll(".kbd-key")].find(
+  const btn = [...document.querySelectorAll(".kbd-key, .mouse-key")].find(
     (el) => el.textContent === label && (el as HTMLElement).offsetParent
   );
   if (!btn) throw new Error(`キーが見つからない: ${label}`);
@@ -146,7 +154,33 @@ Object.assign(window, {
       vv.dispatchEvent(new Event("resize"));
     },
     toggleKeyboard() {
+      mouse.close();
       kbd.toggle();
+    },
+    toggleMouse() {
+      kbd.close();
+      mouse.toggle();
+    },
+    // 映像を1本指でなぞる (パネル表示中にカーソルだけ動くことの検証に使う)
+    dragScreen(from: { x: number; y: number }, to: { x: number; y: number }) {
+      const a = screenPoint(from.x, from.y);
+      const b = screenPoint(to.x, to.y);
+      const init = (x: number, y: number) => ({
+        bubbles: true,
+        cancelable: true,
+        pointerId: 43,
+        pointerType: "touch",
+        clientX: x,
+        clientY: y,
+      });
+      surface.dispatchEvent(new PointerEvent("pointerdown", init(a.x, a.y)));
+      for (let i = 1; i <= 4; i++) {
+        const t = i / 4;
+        surface.dispatchEvent(
+          new PointerEvent("pointermove", init(a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t))
+        );
+      }
+      surface.dispatchEvent(new PointerEvent("pointerup", init(b.x, b.y)));
     },
     openText() {
       textToggle.click();
@@ -166,6 +200,58 @@ Object.assign(window, {
     },
     // 出ている面のラベル。面を切り替えたことの確認に使う。
     layerKeyLabel: () => document.querySelector(".kbd-layer-key")?.textContent ?? "",
+    // つまみキーのラベル。掴んだままかどうかが手元で分かることの確認に使う。
+    holdKeyLabel: () => document.querySelector(".mouse-hold")?.textContent ?? "",
+    // スクロール面を (dx,dy) だけなぞる。0,0 ならなぞらずに離す (=中クリック)。
+    // 1ノッチに満たない距離も渡せる (回らないのに中クリックが出ないことの検証)。
+    rubScroll(dx: number, dy: number) {
+      const pad = document.querySelector(".mouse-scroll") as HTMLElement;
+      pad.setPointerCapture = () => {}; // 合成イベントには実在するポインターが無い
+      const r = pad.getBoundingClientRect();
+      const init = (x: number, y: number) => ({
+        bubbles: true,
+        cancelable: true,
+        pointerId: 44,
+        pointerType: "touch",
+        clientX: x,
+        clientY: y,
+      });
+      const x0 = r.x + r.width / 2;
+      const y0 = r.y + r.height / 2;
+      pad.dispatchEvent(new PointerEvent("pointerdown", init(x0, y0)));
+      for (let i = 1; i <= 8; i++) {
+        const t = i / 8;
+        pad.dispatchEvent(new PointerEvent("pointermove", init(x0 + dx * t, y0 + dy * t)));
+      }
+      pad.dispatchEvent(new PointerEvent("pointerup", init(x0 + dx, y0 + dy)));
+    },
+    // マウスパネルの各部の位置と大きさ。
+    mouseParts() {
+      const at = (sel: string) => rect(document.querySelector(sel));
+      const keys = [...document.querySelectorAll(".mouse-key")].filter(
+        (el) => (el as HTMLElement).offsetParent
+      ) as HTMLElement[];
+      const byLabel = (label: string) =>
+        rect(keys.find((el) => el.textContent === label) ?? null);
+      return {
+        body: at(".mousepad:not(.hidden) .mousepad-body"),
+        pad: at(".mouse-scroll"),
+        keys: at(".mouse-keys"),
+        left: byLabel("左"),
+        right: byLabel("右"),
+        hold: at(".mouse-hold"),
+        dbl: byLabel("ダブル"),
+        // いちばん小さいキーと、その名前 (指で押せない大きさが混ざっていないか)
+        minKey: keys.length
+          ? keys
+              .map((el) => {
+                const r = el.getBoundingClientRect();
+                return { w: r.width, h: r.height, label: el.textContent ?? "" };
+              })
+              .reduce((a, b) => (Math.min(a.w, a.h) <= Math.min(b.w, b.h) ? a : b))
+          : null,
+      };
+    },
     // ラベルでキーを押す (実物と同じ pointerdown の経路を通す)。
     // 押した時点でラベルが変わる(Shiftの大文字化)ので、要素は先に1回だけ引く。
     pressKey(label: string) {

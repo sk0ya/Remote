@@ -8,6 +8,11 @@
 //   2本指スライド     → スクロール(ズーム中はパン)
 //   ピンチ           → 表示ズーム
 // マウス(開発用PC)はそのまま対応するボタン・ホイールを送る。
+//
+// マウスパネル (mouse.ts) を出しているあいだは setCursorOnly(true) になり、
+// 1本指はカーソルを動かすだけになる (押す・つまむ・回すはパネルのボタンが持つ)。
+//   1本指タップ       → その位置へカーソルを飛ばす
+//   1本指ドラッグ     → トラックボール。動かしたぶんだけ今の位置から動かす
 
 export interface Pt {
   x: number;
@@ -72,6 +77,38 @@ const LONG_PRESS_MS = 500;
 const MOVE_THRESHOLD = 12; // px
 const SCROLL_PX_PER_NOTCH = 40;
 const MAX_SCALE = 4;
+
+// トラックボールの効き。指の移動量(画面px)を、そのままホスト画面のpxとして使う。
+//
+// 映像は1920pxのデスクトップを390pxの幅に縮めて映しているので、指の位置を
+// そのままカーソルにすると1pxの指の動きが5px飛ぶ。閉じるボタンもメニューの
+// 1項目も指の腹より小さく、そもそも狙えない。等倍で動かせば1px単位で置ける。
+//
+// ただし等倍のままだと画面の端から端まで5回なぞることになるので、速く払った
+// ときだけ倍率を上げる (トラックパッドと同じ)。ゆっくり動かせば精密、
+// 速く払えば大きく動く、が1本の指で両立する。
+const GAIN_MIN = 1;
+const GAIN_MAX = 3.5;
+const GAIN_FULL_SPEED = 1.2; // px/ms。この速さで上限に届く
+
+export function pointerGain(speed: number): number {
+  if (!(speed > 0)) return GAIN_MIN;
+  return Math.min(GAIN_MAX, GAIN_MIN + (GAIN_MAX - GAIN_MIN) * (speed / GAIN_FULL_SPEED));
+}
+
+function clamp01(v: number): number {
+  return Math.min(1, Math.max(0, v));
+}
+
+// トラックボールで動かし始めるときの「今どこに居るか」。
+//
+// 相対で動かす以上、手元の記憶とPC側の実際が一致していないと最初のひとなぞりで
+// カーソルが飛ぶ。cursor はこちらが動かした結果そのものなので最優先。まだ一度も
+// 動かしていないときは、直前に指を置いた場所(focus)を使う — 少なくとも画面の
+// どのあたりを見ているかは合う。どちらも無ければ中央から始める。
+export function resyncPoint(cursor: Pt | null, focus: Pt | null): Pt {
+  return cursor ?? focus ?? { x: 0.5, y: 0.5 };
+}
 
 export interface Box {
   w: number;
@@ -183,6 +220,21 @@ export class InputController {
   // キーボードを開いたときに見せる、直前にタップしたリモート画面上の位置。
   private focus: Pt | null = null;
 
+  // マウスパネルを出しているあいだ。映像へのタッチはカーソルを動かすだけにする。
+  //
+  // 押す・つまむはパネルのボタンが受け持つので、タップでクリックまで起きると
+  // 「押す前に狙った場所へカーソルを置く」ができない (触れた瞬間に押してしまう)。
+  // 長押しドラッグも同じ理由で止める — つまむのはパネル側の役目になる。
+  //
+  // 動かし方は2通りで、粗いのと細かいのを1本の指で使い分ける:
+  //   タップ   → その位置へ飛ばす (遠くへ運ぶ。指1本ぶんの精度)
+  //   なぞる   → トラックボール。指の動いたぶんだけ今の位置から動かす
+  private cursorOnly = false;
+  // トラックボールで動かすための、今のカーソル位置 (正規化座標)。
+  // 相対で動かす以上、今どこに居るかを手元でも持っておく必要がある。
+  private cursor: Pt | null = null;
+  private lastMoveAt = 0;
+
   // 直前の表示領域の大きさ。変わっていなければ置き直す必要がない。
   private box: Box;
   // ソフトキーボードで領域が削られている (埋めて表示している) かどうか
@@ -213,6 +265,29 @@ export class InputController {
     this.outbox.send(msg);
   }
 
+  // マウスパネルの開閉に合わせて、映像へのタッチの扱いを切り替える。
+  setCursorOnly(on: boolean): void {
+    if (this.cursorOnly === on) return;
+    this.cursorOnly = on;
+    // 切り替えた時点で進行中だった長押しドラッグは畳む。
+    // 残すとPC側は左ボタンを押しっぱなしのままになる。
+    clearTimeout(this.longPressTimer);
+    if (this.dragging) {
+      this.send({ t: "up", b: 0 });
+      this.dragging = false;
+    }
+    if (!on) return;
+
+    // トラックボールは「今どこに居るか」からの相対で動かすので、手元の記憶と
+    // PC側の実際がずれていると、最初のひとなぞりでカーソルが飛ぶ。ずれるのは
+    // 手元がまだ何も知らないとき(開いてすぐスクロールだけした等)と、PCの
+    // 実物のマウスが動かされたとき。開いた時点で一度こちらから言い切って
+    // 合わせておく。ふだんは同じ座標を送り直すだけなので何も動かない。
+    const p = resyncPoint(this.cursor, this.focus);
+    this.cursor = p;
+    this.send({ t: "mv", x: p.x, y: p.y });
+  }
+
   private sendNow(msg: object): void {
     if (this.dc.readyState === "open") this.dc.send(JSON.stringify(msg));
   }
@@ -241,7 +316,26 @@ export class InputController {
   // 移動は次の描画フレームまでまとめる (1イベント1パケットにしない)。
   private moveTo(clientX: number, clientY: number): void {
     const p = this.toNorm(clientX, clientY);
-    if (p) this.outbox.move(p.x, p.y);
+    if (!p) return;
+    this.cursor = p;
+    this.outbox.move(p.x, p.y);
+  }
+
+  // トラックボール。指の動いたぶんだけ、今のカーソル位置から動かす。
+  // dtMs は前のイベントからの経過。速く払ったときだけ倍率を上げるのに使う。
+  private moveBy(dx: number, dy: number, dtMs: number): void {
+    const vw = this.video.videoWidth;
+    const vh = this.video.videoHeight;
+    if (!(vw > 0) || !(vh > 0)) return;
+    const gain = pointerGain(Math.hypot(dx, dy) / Math.max(1, dtMs));
+    // 画面の1px = ホスト画面の1px。x と y で割る数が違うのは、正規化座標が
+    // 軸ごとに幅・高さで割った値だから (ホスト画面のpxで見れば同じ倍率)。
+    const from = resyncPoint(this.cursor, this.focus);
+    this.cursor = {
+      x: clamp01(from.x + (dx * gain) / vw),
+      y: clamp01(from.y + (dy * gain) / vh),
+    };
+    this.outbox.move(this.cursor.x, this.cursor.y);
   }
 
   // キーボード表示時に見せる位置を、クリックの完了を待たずに記録する。
@@ -305,6 +399,12 @@ export class InputController {
       this.moved = false;
       this.dragging = false;
       this.multi = false;
+      if (this.cursorOnly) {
+        // 触れただけでは動かさない。なぞればトラックボール、離すまで
+        // 動かなければタップとして、離した時点でその位置へ飛ばす。
+        this.lastMoveAt = this.downAt;
+        return;
+      }
       this.longPressTimer = window.setTimeout(() => {
         // 長押し: 左ボタンを押し込んでドラッグ開始
         this.dragging = true;
@@ -342,7 +442,14 @@ export class InputController {
       return;
     }
 
-    if (this.pointers.size === 1) {
+    if (this.pointers.size === 1 && this.cursorOnly) {
+      const now = performance.now();
+      this.moveBy(e.clientX - prev.x, e.clientY - prev.y, now - this.lastMoveAt);
+      this.lastMoveAt = now;
+      if (Math.hypot(e.clientX - this.startPt.x, e.clientY - this.startPt.y) > MOVE_THRESHOLD) {
+        this.moved = true;
+      }
+    } else if (this.pointers.size === 1) {
       const dx = e.clientX - this.startPt.x;
       const dy = e.clientY - this.startPt.y;
       if (!this.moved && Math.hypot(dx, dy) > MOVE_THRESHOLD) {
@@ -404,6 +511,7 @@ export class InputController {
       if (!this.twoFingerMoved && performance.now() - this.twoFingerStart.time < TAP_MS) {
         const p = this.toNorm(this.twoFingerStart.mid.x, this.twoFingerStart.mid.y);
         if (p) {
+          this.cursor = p; // 次のトラックボール操作はここから続ける
           this.send({ t: "mv", x: p.x, y: p.y });
           this.send({ t: "dn", b: 2 });
           this.send({ t: "up", b: 2 });
@@ -419,11 +527,19 @@ export class InputController {
       return;
     }
 
+    // パネルを出しているあいだのタップ。押さずに、その位置へカーソルを飛ばす。
+    // なぞって寄せるだけだと遠くへ運ぶのに何往復もかかるので、粗い移動はこちらが持つ。
+    if (this.cursorOnly) {
+      if (!this.multi && !this.moved) this.moveTo(e.clientX, e.clientY);
+      return;
+    }
+
     // 1本指タップ → 左クリック
     if (!this.multi && !this.moved && performance.now() - this.downAt < TAP_MS) {
       const p = this.toNorm(e.clientX, e.clientY);
       if (p) {
         this.focus = p;
+        this.cursor = p; // 次にパネルを開いたとき、ここから相対で動かす
         this.send({ t: "mv", x: p.x, y: p.y });
         this.send({ t: "dn", b: 0 });
         this.send({ t: "up", b: 0 });

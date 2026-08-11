@@ -411,7 +411,261 @@ async function run(page, name, width, height) {
   near(back.content.w, closed.content.w, 1, `${name}: 閉じても全体表示に戻らない`);
   ok(back.micShown, `${name}: 閉じてもマイクボタンが戻らない`);
 
-  return { closed, open };
+  // 4. マウス操作パネル。タッチでは長押し・2本指に当てるしかなかった操作を、
+  //    外しようのないボタンにして出す。
+  await page.evaluate("window.test.toggleMouse()");
+  await new Promise((r) => setTimeout(r, 100));
+  const mouse = await page.evaluate("JSON.stringify(window.test.measure())").then(JSON.parse);
+  const parts = await page.evaluate("JSON.stringify(window.test.mouseParts())").then(JSON.parse);
+  ok(mouse.panel, `${name}: マウスパネルが出ていない`);
+  // キーボードより低いこと。映像を潰してまで置くものではない。
+  ok(
+    mouse.panel.h < open.panel.h,
+    `${name}: マウスパネルがキーボードより高い`,
+    `${mouse.panel.h.toFixed(0)}px / キーボード ${open.panel.h.toFixed(0)}px`
+  );
+  ok(mouse.box.h > 40, `${name}: マウスパネルで映像の領域が潰れている`, `${mouse.box.h}px`);
+  // キーボードと違い、こちらは拡大して切り取らないこと。狙って押すために出す
+  // パネルなのに一部しか見えないと、カーソルが見えない範囲へ出て行方が分からなくなる。
+  ok(
+    mouse.transform === "none",
+    `${name}: マウスパネルを出すと映像が拡大・切り取り表示になる`,
+    mouse.transform
+  );
+  ok(
+    mouse.content.w <= mouse.box.w + 1 && mouse.content.h <= mouse.box.h + 1,
+    `${name}: マウスパネルを出すと映像がはみ出す`,
+    `映像 ${mouse.content.w.toFixed(0)}x${mouse.content.h.toFixed(0)} / ` +
+      `領域 ${mouse.box.w.toFixed(0)}x${mouse.box.h.toFixed(0)}`
+  );
+
+  // 開いた時点で、手元のカーソル位置をPC側へ言い切って合わせること。
+  // ずれたまま相対で動かし始めると、最初のひとなぞりでカーソルが飛ぶ。
+  await page.evaluate("window.test.toggleMouse()"); // いったん閉じる
+  await new Promise((r) => setTimeout(r, 60));
+  await page.evaluate("window.test.tapScreen(0.7, 0.3)"); // ここをクリックしておく
+  await page.evaluate("window.test.takeDcSent()");
+  await page.evaluate("window.test.toggleMouse()"); // もう一度開く
+  await new Promise((r) => setTimeout(r, 60));
+  const synced = (
+    await page.evaluate("JSON.stringify(window.test.takeDcSent())").then(JSON.parse)
+  ).find((m) => m.t === "mv");
+  ok(
+    synced && Math.abs(synced.x - 0.7) < 0.02 && Math.abs(synced.y - 0.3) < 0.02,
+    `${name}: パネルを開いてもカーソル位置を合わせ直さない`,
+    JSON.stringify(synced)
+  );
+
+  for (const p of Object.keys(parts)) {
+    ok(parts[p], `${name}: マウスパネルの ${p} が無い`);
+  }
+  const rightOf = (a, b) => a.x >= b.x + b.w - 1; // aがbの右にある
+  const below = (a, b) => a.y >= b.y + b.h - 1;
+  // なぞる面と押すキーは場所で分ける。混ざると、なぞるつもりが押してしまう。
+  ok(rightOf(parts.keys, parts.pad), `${name}: なぞる面と押すキーが分かれていない`);
+  ok(
+    rightOf(parts.right, parts.left) && below(parts.hold, parts.left),
+    `${name}: 左・右・つまむの並びが崩れている`
+  );
+  ok(rightOf(parts.dbl, parts.hold), `${name}: ダブルがつまみの右に無い`);
+  // 一番よく押すものが一番大きいこと
+  ok(
+    parts.left.w > parts.right.w,
+    `${name}: 左が右より大きくない`,
+    `${parts.left.w.toFixed(0)}px / ${parts.right.w.toFixed(0)}px`
+  );
+  // 指で押せる大きさが揃っていること (小さいキーを混ぜて場所を稼がない)
+  ok(
+    parts.minKey && parts.minKey.w >= 60 && parts.minKey.h >= 36,
+    `${name}: 指で押せない大きさのキーがある`,
+    parts.minKey &&
+      `${parts.minKey.label} が ${parts.minKey.w.toFixed(0)}x${parts.minKey.h.toFixed(0)}px`
+  );
+  // なぞる面は指を滑らせるので、キー1つより広く取る
+  ok(
+    parts.pad.w >= 80 && parts.pad.h >= 70,
+    `${name}: なぞる面が狭い`,
+    `${parts.pad.w.toFixed(0)}x${parts.pad.h.toFixed(0)}px`
+  );
+
+  // 出しているあいだ、映像をなぞってもカーソルが動くだけでクリックにならない。
+  // 押す場所を決められないと、右クリックもつまみも狙って出せない。
+  await page.evaluate("window.test.takeDcSent()");
+  await page.evaluate("window.test.dragScreen({x:0.3,y:0.3},{x:0.6,y:0.6})");
+  await new Promise((r) => setTimeout(r, 100));
+  const traced = await page.evaluate("JSON.stringify(window.test.takeDcSent())").then(JSON.parse);
+  ok(
+    traced.some((m) => m.t === "mv"),
+    `${name}: パネル表示中に映像をなぞってもカーソルが動かない`
+  );
+  ok(
+    !traced.some((m) => m.t === "dn" || m.t === "up"),
+    `${name}: パネル表示中に映像へ触れるとクリックになる`,
+    JSON.stringify(traced)
+  );
+
+  // 粗い移動と細かい移動を1本の指で使い分けられること。
+  // 1920pxのデスクトップを390pxの幅に縮めて映しているので、指の位置をそのまま
+  // カーソルにすると1pxの指の動きが5px飛び、小さいボタンは狙えない。
+  const lastMove = (msgs) => msgs.filter((m) => m.t === "mv").at(-1);
+  await page.evaluate("window.test.takeDcSent()");
+  await page.evaluate("window.test.tapScreen(0.2, 0.2)");
+  await new Promise((r) => setTimeout(r, 60));
+  const jumped = lastMove(
+    await page.evaluate("JSON.stringify(window.test.takeDcSent())").then(JSON.parse)
+  );
+  ok(
+    jumped && Math.abs(jumped.x - 0.2) < 0.02 && Math.abs(jumped.y - 0.2) < 0.02,
+    `${name}: パネル表示中のタップでその位置へ飛ばない`,
+    JSON.stringify(jumped)
+  );
+
+  // なぞったときは指の位置へ飛ばず、動かしたぶんだけ今の位置から動く。
+  // (0.8→0.9 をなぞる = 画面の1割ぶん。飛んでいれば0.9付近に出る)
+  await page.evaluate("window.test.dragScreen({x:0.8,y:0.8},{x:0.9,y:0.9})");
+  await new Promise((r) => setTimeout(r, 60));
+  const nudged = lastMove(
+    await page.evaluate("JSON.stringify(window.test.takeDcSent())").then(JSON.parse)
+  );
+  ok(
+    nudged && nudged.x > 0.2 && nudged.x < 0.6,
+    `${name}: なぞるとトラックボールにならず指の位置へ飛ぶ`,
+    JSON.stringify(nudged)
+  );
+
+  // なぞる面。矢印ボタンだと1回1ノッチで、長い文書は連射待ちになる。
+  const totalWheel = (msgs, axis) =>
+    msgs.filter((m) => m.t === "wh").reduce((n, m) => n + (m[axis] ?? 0), 0);
+  await page.evaluate("window.test.takeDcSent()");
+  await page.evaluate("window.test.rubScroll(0, 60)"); // 指を下へ60px = 上スクロール
+  const rubbedUp = await page.evaluate("JSON.stringify(window.test.takeDcSent())").then(JSON.parse);
+  ok(
+    totalWheel(rubbedUp, "dy") >= 4,
+    `${name}: 面をなぞってもスクロールしない`,
+    JSON.stringify(rubbedUp)
+  );
+  // 縦になぞったぶんに横が混ざらないこと (行がじりじり横へ流れる)
+  ok(
+    totalWheel(rubbedUp, "dx") === 0,
+    `${name}: 縦になぞると横スクロールが混ざる`,
+    JSON.stringify(rubbedUp)
+  );
+
+  await page.evaluate("window.test.rubScroll(0, -60)"); // 指を上へ = 下スクロール
+  ok(
+    totalWheel(
+      await page.evaluate("JSON.stringify(window.test.takeDcSent())").then(JSON.parse),
+      "dy"
+    ) < 0,
+    `${name}: 逆になぞっても逆向きにスクロールしない`
+  );
+
+  // 横も同じ面でなぞれること (専用のボタンを並べずに済ませている)
+  await page.evaluate("window.test.rubScroll(60, 0)");
+  const rubbedSide = await page
+    .evaluate("JSON.stringify(window.test.takeDcSent())")
+    .then(JSON.parse);
+  ok(
+    totalWheel(rubbedSide, "dx") !== 0,
+    `${name}: 面を横になぞっても横スクロールしない`,
+    JSON.stringify(rubbedSide)
+  );
+  ok(
+    totalWheel(rubbedSide, "dy") === 0,
+    `${name}: 横になぞると縦スクロールが混ざる`,
+    JSON.stringify(rubbedSide)
+  );
+  // なぞっているあいだに中クリックが出ないこと
+  // (Windowsではタブが開いたり自動スクロールに入ってしまう)
+  ok(
+    !rubbedSide.some((m) => m.t === "dn"),
+    `${name}: なぞると中クリックが出る`,
+    JSON.stringify(rubbedSide)
+  );
+
+  // なぞらずに離したときだけ中クリック (ホイールを押すのと同じ)。
+  // 中クリックのためだけのボタンを並べずに済ませている。
+  await page.evaluate("window.test.rubScroll(0, 0)");
+  const midTap = await page.evaluate("JSON.stringify(window.test.takeDcSent())").then(JSON.parse);
+  ok(
+    JSON.stringify(midTap) ===
+      JSON.stringify([
+        { t: "dn", b: 1 },
+        { t: "up", b: 1 },
+      ]),
+    `${name}: 面を押しても中クリックにならない`,
+    JSON.stringify(midTap)
+  );
+
+  // 1ノッチに届かない短いなぞりは、回りもしないし中クリックにもならないこと。
+  // ここで中クリックが出るとWindowsが自動スクロールに入り、以後カーソルを
+  // 動かすたびに画面が流れて「位置がずれた」ように見える。
+  await page.evaluate("window.test.rubScroll(0, 10)");
+  const shortRub = await page.evaluate("JSON.stringify(window.test.takeDcSent())").then(JSON.parse);
+  ok(
+    shortRub.length === 0,
+    `${name}: 1ノッチに満たないなぞりで中クリックが出る`,
+    JSON.stringify(shortRub)
+  );
+
+  // 右クリックはボタン1つで出る (2本指タップの判定に頼らない)
+  await page.evaluate('window.test.pressKey("右")');
+  const rightClick = await page.evaluate("JSON.stringify(window.test.takeDcSent())").then(JSON.parse);
+  ok(
+    JSON.stringify(rightClick) ===
+      JSON.stringify([
+        { t: "dn", b: 2 },
+        { t: "up", b: 2 },
+      ]),
+    `${name}: 右ボタンが右クリックを送らない`,
+    JSON.stringify(rightClick)
+  );
+
+  // つまむ → なぞる → はなす。押しっぱなしのまま運べること。
+  await page.evaluate('window.test.pressKey("つまむ")');
+  const grabbed = await page.evaluate("JSON.stringify(window.test.takeDcSent())").then(JSON.parse);
+  ok(
+    JSON.stringify(grabbed) === JSON.stringify([{ t: "dn", b: 0 }]),
+    `${name}: つまんでも左ボタンが押されない`,
+    JSON.stringify(grabbed)
+  );
+  ok(
+    (await page.evaluate("window.test.holdKeyLabel()")) === "はなす",
+    `${name}: 掴んでいることがキートップに出ない`
+  );
+  await page.evaluate("window.test.dragScreen({x:0.6,y:0.6},{x:0.3,y:0.3})");
+  await new Promise((r) => setTimeout(r, 100));
+  const carried = await page.evaluate("JSON.stringify(window.test.takeDcSent())").then(JSON.parse);
+  ok(
+    carried.some((m) => m.t === "mv") && !carried.some((m) => m.t === "up"),
+    `${name}: つまんだまま運べない`,
+    JSON.stringify(carried)
+  );
+
+  // 掴んだままパネルを閉じたら離すこと。残すとPC側は左ボタンを押しっぱなしになり、
+  // 以後の操作が全部ドラッグになって、画面を見ても原因が分からない。
+  await page.evaluate("window.test.toggleMouse()");
+  await new Promise((r) => setTimeout(r, 100));
+  const released = await page.evaluate("JSON.stringify(window.test.takeDcSent())").then(JSON.parse);
+  ok(
+    released.some((m) => m.t === "up" && !m.b),
+    `${name}: 掴んだままパネルを閉じると左ボタンが戻らない`,
+    JSON.stringify(released)
+  );
+  const afterMouse = await page.evaluate("JSON.stringify(window.test.measure())").then(JSON.parse);
+  near(afterMouse.content.h, closed.content.h, 1, `${name}: パネルを閉じても全体表示に戻らない`);
+
+  // 閉じたら映像のタップはまたクリックに戻る
+  await page.evaluate("window.test.takeDcSent()");
+  await page.evaluate("window.test.tapScreen(0.5, 0.5)");
+  const tapped = await page.evaluate("JSON.stringify(window.test.takeDcSent())").then(JSON.parse);
+  ok(
+    tapped.some((m) => m.t === "dn"),
+    `${name}: パネルを閉じてもタップがクリックに戻らない`,
+    JSON.stringify(tapped)
+  );
+
+  return { closed, open, mouse };
 }
 
 // ---- 実行 ------------------------------------------------------------------
@@ -453,14 +707,15 @@ try {
     `操作段 ${landscape.open.opsHeight}px / キー ${landscape.open.keyHeight}px`
   );
   ok(landscape.open.rowTops === 4, "横持ち: 段数が4段ではない", `${landscape.open.rowTops}段`);
-  console.log(
-    `縦持ち: パネル ${portrait.open.panel.h.toFixed(0)}px / ` +
-      `映像に残る高さ ${portrait.open.box.h.toFixed(0)}px`
-  );
-  console.log(
-    `横持ち: パネル ${landscape.open.panel.h.toFixed(0)}px / ` +
-      `映像に残る高さ ${landscape.open.box.h.toFixed(0)}px`
-  );
+  for (const [name, r] of [
+    ["縦持ち", portrait],
+    ["横持ち", landscape],
+  ]) {
+    console.log(
+      `${name}: キーボード ${r.open.panel.h.toFixed(0)}px (映像 ${r.open.box.h.toFixed(0)}px) / ` +
+        `マウス ${r.mouse.panel.h.toFixed(0)}px (映像 ${r.mouse.box.h.toFixed(0)}px)`
+    );
+  }
 } finally {
   page.close();
 }

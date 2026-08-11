@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import { Outbox, refit, clampPan, toNorm } from "./input";
+import { Outbox, refit, clampPan, toNorm, pointerGain, resyncPoint } from "./input";
 import type { Box, Pt, Rect } from "./input";
 
 // 送信を記録し、rAF相当のスケジュールを手動で進められるOutboxを作る。
@@ -265,5 +265,52 @@ describe("clampPan", () => {
   it("等倍のときは動かせない", () => {
     expect(clampPan(-50, 800, 1)).toBe(0);
     expect(clampPan(50, 800, 1)).toBe(0);
+  });
+});
+
+// 映像は1920pxのデスクトップを390pxの幅に縮めて映しているので、指の位置を
+// そのままカーソルにすると1pxの指の動きが5px飛ぶ。トラックボールは等倍から
+// 始めて、速く払ったときだけ倍率を上げる。
+describe("pointerGain", () => {
+  it("ゆっくり動かすと等倍 (1px単位で置ける)", () => {
+    expect(pointerGain(0)).toBe(1);
+    expect(pointerGain(0.01)).toBeLessThan(1.1);
+  });
+
+  it("速く払うほど大きく動くが、上限で頭打ちになる", () => {
+    const slow = pointerGain(0.2);
+    const fast = pointerGain(0.8);
+    expect(fast).toBeGreaterThan(slow);
+    expect(pointerGain(100)).toBe(3.5);
+    expect(pointerGain(1e6)).toBe(3.5); // 端末の取りこぼしで飛んだ値でも暴れない
+  });
+
+  // 経過時間が0や負(タイマーの分解能)でも、そこだけ極端に飛ばさない。
+  it("速さが取れないときは等倍にする", () => {
+    expect(pointerGain(NaN)).toBe(1);
+    expect(pointerGain(-1)).toBe(1);
+  });
+});
+
+// トラックボールは「今どこに居るか」からの相対で動かす。手元の記憶とPC側の
+// 実際がずれていると、最初のひとなぞりでカーソルが飛ぶ。
+describe("resyncPoint", () => {
+  const cursor = { x: 0.2, y: 0.8 };
+  const focus = { x: 0.7, y: 0.3 };
+
+  // cursor はこちらが動かした結果そのものなので、PC側の実際と一致している。
+  it("動かした結果を最優先で使う", () => {
+    expect(resyncPoint(cursor, focus)).toEqual(cursor);
+    expect(resyncPoint(cursor, null)).toEqual(cursor);
+  });
+
+  // 開いてすぐスクロールだけした等、まだ一度も動かしていない場合。
+  // 直前に指を置いた場所なら、少なくとも見ているあたりには合う。
+  it("まだ動かしていなければ直前に指を置いた場所から始める", () => {
+    expect(resyncPoint(null, focus)).toEqual(focus);
+  });
+
+  it("手がかりが無ければ中央から始める", () => {
+    expect(resyncPoint(null, null)).toEqual({ x: 0.5, y: 0.5 });
   });
 });

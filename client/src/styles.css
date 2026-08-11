@@ -152,6 +152,12 @@ input.field {
   padding: 6px 12px;
 }
 
+/* 絵文字1文字のボタン。文字ラベルと同じ12pxでは何のアイコンか判らない。 */
+.viewer .hud button.ghost.icon {
+  font-size: 17px;
+  padding: 6px 10px;
+}
+
 /* 押しっぱなしで喋るボタン。片手で握ったまま親指が届く左下に固定する。
    位置はHUDのステータス表示に影響されない(録音開始で動かない)。 */
 .viewer .mic {
@@ -188,8 +194,11 @@ input.field {
 }
 
 /* Webアプリ側とOS側のキーボードを同じHUDに並べる。2つの違いが
-   アイコンだけで分かりにくいので、ボタンの文字で経路を明示する。 */
-.viewer .hud button.text-input-toggle.active {
+   アイコンだけで分かりにくいので、ボタンの文字で経路を明示する。
+   🖱も同じ扱い — 出しているあいだは映像へのタップの意味が変わるので、
+   出ていることがHUDから分かるようにする。 */
+.viewer .hud button.text-input-toggle.active,
+.viewer .hud button.ghost.active {
   background: #3b6cf5;
   border-color: #3b6cf5;
 }
@@ -382,6 +391,130 @@ input.field {
   -webkit-touch-callout: none;
 }
 
+/* マウス操作パネル。
+   形で役割を分ける — 面はなぞる物、角の丸い四角は押す物。実物のマウスを模した
+   絵や刻みは置かない (小さく描いたところで押しにくいだけで、何が起きるかは
+   結局ラベルを読んで知ることになる)。
+   キーボードと同じ .kbd の上に載せるが、キー1つ1つの見た目は別に持つ。 */
+.mousepad {
+  background: rgba(13, 15, 21, 0.94);
+  padding: 10px 12px calc(10px + env(safe-area-inset-bottom, 0));
+}
+
+/* 高さはここで決めて、中身は伸び縮みして分け合う。 */
+.mousepad-body {
+  display: flex;
+  align-items: stretch;
+  gap: 10px;
+  height: 116px;
+}
+
+/* なぞる面。1回1ノッチの矢印ボタンだと長い文書は連射待ちになる。
+   一段沈めて、押す物と間違えないようにする。 */
+.mouse-scroll {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  min-width: 0;
+  border-radius: 18px;
+  background: rgba(0, 0, 0, 0.32);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.06);
+  color: #7c869e;
+  /* なぞるので、指の動きをブラウザ側に取られないようにする */
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-touch-callout: none;
+}
+
+/* なぞっているあいだ色を持ち上げる。ノッチが出ているかは映像の方を見ないと
+   分からないので、少なくとも「触れている」ことは手元で返す。 */
+.mouse-scroll.rubbing {
+  background: rgba(59, 108, 245, 0.2);
+  color: #c3d0f4;
+}
+
+/* ホイールのついたマウスの輪郭。スクロールの印として広く通じる形。 */
+.mouse-scroll-mark {
+  width: 17px;
+  height: 25px;
+  border-radius: 9px;
+  box-shadow: inset 0 0 0 2px currentColor;
+  position: relative;
+  opacity: 0.65;
+}
+
+.mouse-scroll-mark::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 5px;
+  width: 2px;
+  height: 7px;
+  border-radius: 1px;
+  background: currentColor;
+  transform: translateX(-50%);
+}
+
+.mouse-scroll-label {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+}
+
+/* 押す物。左を大きく取り、右・つまむ・ダブルを同じ大きさで並べる。 */
+.mouse-keys {
+  flex: 2.15;
+  display: grid;
+  grid-template-columns: 1.25fr 1fr;
+  grid-auto-rows: 1fr;
+  gap: 10px;
+  min-width: 0;
+}
+
+.mouse-key {
+  appearance: none;
+  border: none;
+  border-radius: 18px;
+  background: rgba(255, 255, 255, 0.08);
+  color: #e9ecf3;
+  font-size: 16px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  line-height: 1;
+  min-width: 0;
+  padding: 0 4px;
+  white-space: nowrap;
+  overflow: hidden;
+  cursor: pointer;
+  touch-action: manipulation;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-touch-callout: none;
+  transition: background 90ms ease;
+}
+
+/* いちばん使うものだけ一段明るくする。色は足さない (増やすほど何が主役か
+   分からなくなる)。 */
+.mouse-primary {
+  background: rgba(255, 255, 255, 0.14);
+  font-size: 19px;
+}
+
+.mouse-key:active {
+  background: rgba(255, 255, 255, 0.24);
+}
+
+/* つまみは押すと状態が残る唯一のキー。掴んでいるあいだだけ色を使う。 */
+.mouse-hold.active,
+.mouse-hold.active:active {
+  background: #3b6cf5;
+  color: #fff;
+}
+
 .kbd-key.active,
 .kbd-key:active,
 .kbd-ops .kbd-key.active,
@@ -417,6 +550,20 @@ input.field {
   .kbd-ops {
     flex-direction: row;
     margin-top: 2px;
+  }
+
+  /* 横持ちは縦の余裕が無い。幅は余っているので、詰めるのは高さだけでよい。 */
+  .mousepad {
+    padding: 7px 10px calc(7px + env(safe-area-inset-bottom, 0));
+  }
+
+  .mousepad-body {
+    height: 84px;
+    gap: 8px;
+  }
+
+  .mouse-keys {
+    gap: 8px;
   }
 
   /* flex-grow は段の合計幅をJSから入れてある。段をまたいでキー幅が揃う。 */

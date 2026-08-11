@@ -9,6 +9,8 @@
 //   - 幅は段ごとの比 (w) をデータに持たせ、CSSのnth-childでは当てない。
 //     キーを足し引きしても他の段が崩れない。
 
+import { Repeater } from "./repeat";
+
 type Send = (msg: object) => void;
 
 export interface Key {
@@ -103,9 +105,6 @@ export const MODIFIERS: string[] = OP_ROWS.flat()
 // 段の合計幅。横並びにしたときに、段をまたいでキーの幅を揃えるのに使う。
 export const rowUnits = (keys: Key[]): number => keys.reduce((n, k) => n + (k.w ?? 1), 0);
 
-const REPEAT_DELAY_MS = 400;
-const REPEAT_INTERVAL_MS = 60;
-
 type Layer = "abc" | "num";
 
 export class VirtualKeyboard {
@@ -118,9 +117,7 @@ export class VirtualKeyboard {
   private letterButtons: HTMLButtonElement[] = [];
   private sticky = new Set<string>();
   private stickyButtons = new Map<string, HTMLButtonElement>();
-  // 連射のタイマーはキーごとに持つ。1組を使い回すと、↓を押しながら別の指で
-  // ⌫を叩いたときに、離していない↓の連射まで止まってしまう。
-  private repeats = new Map<HTMLButtonElement, { delay: number; interval: number }>();
+  private repeats = new Repeater();
   private observer: ResizeObserver;
 
   constructor(
@@ -210,7 +207,7 @@ export class VirtualKeyboard {
     });
     if (k.repeat) {
       for (const ev of ["pointerup", "pointercancel", "pointerleave"]) {
-        btn.addEventListener(ev, () => this.stopRepeat(btn));
+        btn.addEventListener(ev, () => this.repeats.stop(btn));
       }
     }
     if (k.mod) this.stickyButtons.set(k.code, btn);
@@ -228,31 +225,7 @@ export class VirtualKeyboard {
 
   private pressKey(k: Key, btn: HTMLButtonElement): void {
     this.tapKey(k.code);
-    if (!k.repeat) return;
-    this.stopRepeat(btn); // 同じキーの押し直し
-    const t = { delay: 0, interval: 0 };
-    t.delay = window.setTimeout(() => {
-      t.interval = window.setInterval(() => this.tapKey(k.code), REPEAT_INTERVAL_MS);
-    }, REPEAT_DELAY_MS);
-    this.repeats.set(btn, t);
-  }
-
-  // btnを渡すとそのキーだけ、省くと全部止める(閉じるとき・片付けるとき)。
-  private stopRepeat(btn?: HTMLButtonElement): void {
-    const clear = (t: { delay: number; interval: number }): void => {
-      clearTimeout(t.delay);
-      clearInterval(t.interval);
-    };
-    if (btn) {
-      const t = this.repeats.get(btn);
-      if (t) {
-        clear(t);
-        this.repeats.delete(btn);
-      }
-      return;
-    }
-    for (const t of this.repeats.values()) clear(t);
-    this.repeats.clear();
+    if (k.repeat) this.repeats.start(btn, () => this.tapKey(k.code));
   }
 
   private tapKey(code: string): void {
@@ -309,14 +282,14 @@ export class VirtualKeyboard {
     const hidden = this.root.classList.toggle("hidden");
     if (hidden) {
       this.releaseSticky();
-      this.stopRepeat();
+      this.repeats.stop();
       this.setLayer("abc"); // 次に開いたときは文字面から
     }
   }
 
   // 再接続のたびに作り直されるので、古い方のDOMとタイマーは片付ける。
   dispose(): void {
-    this.stopRepeat();
+    this.repeats.stop();
     this.observer.disconnect();
     this.root.remove();
     this.onLayout(0); // 詰めていたぶんを戻す

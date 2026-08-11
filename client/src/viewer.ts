@@ -3,6 +3,7 @@
 import { SignalChannel } from "./signal";
 import { InputController } from "./input";
 import { VirtualKeyboard } from "./keyboard";
+import { MousePad } from "./mouse";
 import { assertPasskey, ticketMAC, b64uDecode } from "./webauthn";
 import { loadCredId, saveCredId } from "./config";
 import { VoiceInput, voiceSupported } from "./voice";
@@ -27,6 +28,7 @@ export const VIEWER_HTML = `
         <span id="vst" class="status">接続中...</span>
         <span class="hud-btns">
           <button class="ghost" id="disp-toggle" style="display:none"></button>
+          <button class="ghost icon" id="mouse-toggle" title="マウス操作パネル">🖱</button>
           <button class="ghost" id="kbd-toggle" title="Webアプリのキーボード">Web⌨</button>
           <button class="ghost text-input-toggle" id="text-toggle" style="display:none" title="スマホOSのキーボード">OS⌨</button>
           <button class="ghost" id="exit">切断</button>
@@ -49,6 +51,7 @@ export function renderViewer(app: HTMLElement, hostId: string, onExit: () => voi
   const st = document.getElementById("vst")!;
   const dispBtn = document.getElementById("disp-toggle") as HTMLButtonElement;
   const micBtn = document.getElementById("mic") as HTMLButtonElement;
+  const mouseToggle = document.getElementById("mouse-toggle") as HTMLButtonElement;
   const textToggle = document.getElementById("text-toggle") as HTMLButtonElement;
   const textEntry = document.getElementById("text-entry") as HTMLFormElement;
   const textField = document.getElementById("text-field") as HTMLInputElement;
@@ -56,6 +59,7 @@ export function renderViewer(app: HTMLElement, hostId: string, onExit: () => voi
   const gate = document.getElementById("playgate") as HTMLButtonElement;
   let pc: RTCPeerConnection | null = null;
   let keyboard: VirtualKeyboard | null = null;
+  let mouse: MousePad | null = null;
   let voice: VoiceInput | null = null;
   let text: TextInput | null = null;
   let controller: InputController | null = null;
@@ -108,6 +112,8 @@ export function renderViewer(app: HTMLElement, hostId: string, onExit: () => voi
     voice = null;
     text?.dispose();
     text = null;
+    mouse?.dispose();
+    mouse = null;
     controller?.dispose();
     controller = null;
     pc?.close();
@@ -263,6 +269,20 @@ export function renderViewer(app: HTMLElement, hostId: string, onExit: () => voi
       const ctl = controller;
       keyboard?.dispose(); // 再接続で古いキーボードのDOMを残さない
       keyboard = new VirtualKeyboard(vroot, (msg) => ctl.send(msg), onKbdLayout, voiceSupported());
+      mouse?.dispose();
+      mouse = new MousePad(
+        vroot,
+        (msg) => ctl.send(msg),
+        (height) => screen.setMousePadHeight(height),
+        // 出ているあいだ、映像へのタッチはカーソルを置くだけにする。
+        // 押すのはパネルのボタンなので、タップでクリックまで起きると
+        // 狙った場所にカーソルを置けない。
+        (open) => {
+          ctl.setCursorOnly(open);
+          mouseToggle.classList.toggle("active", open);
+          if (open) toast("タップで移動 / なぞって微調整 → ボタンで押す");
+        }
+      );
       text?.dispose();
       text = new TextInput(
         textToggle,
@@ -270,7 +290,10 @@ export function renderViewer(app: HTMLElement, hostId: string, onExit: () => voi
         textField,
         textClose,
         (msg) => ctl.send(msg),
-        () => keyboard?.close(),
+        () => {
+          keyboard?.close();
+          mouse?.close();
+        },
         (height) => screen.setTextInputHeight(height)
       );
       textToggle.style.display = "";
@@ -283,10 +306,17 @@ export function renderViewer(app: HTMLElement, hostId: string, onExit: () => voi
       };
       if (ev.channel.readyState === "open") onReady();
       else ev.channel.onopen = onReady;
+      // 下端のパネルは一度に1つだけ出す。2つ並べると映像に残る高さが無くなる。
       // onclick代入で再接続時の重複登録を防ぐ (addEventListenerだと2回目以降トグルが打ち消し合う)
       (document.getElementById("kbd-toggle") as HTMLButtonElement).onclick = () => {
         text?.close();
+        mouse?.close();
         keyboard?.toggle();
+      };
+      mouseToggle.onclick = () => {
+        text?.close();
+        keyboard?.close();
+        mouse?.toggle();
       };
       // 音声入力 (対応ブラウザのみ。ボタンのハンドラはプロパティ代入なので再接続でも重複しない)
       // 映像の上に浮かぶ🎤と、キーボードの🎤キーの両方から同じ録音を動かす。

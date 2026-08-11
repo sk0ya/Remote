@@ -19,7 +19,31 @@ export interface ScreenLayout {
   setWebKeyboardHeight(height: number): void;
   // OSキーボード直上の入力欄と余白の高さ(閉じているときは0)。
   setTextInputHeight(height: number): void;
+  // マウス操作パネルの高さ(隠しているときは0)。
+  setMousePadHeight(height: number): void;
   dispose(): void;
+}
+
+// 下端で映像を削っているものの高さ。
+export interface Occlusion {
+  occluded: number; // OSキーボードが覆っている高さ
+  webKeyboard: number; // 画面内キーボード
+  textInput: number; // OSキーボード直上の入力欄
+  mousePad: number; // マウス操作パネル
+}
+
+// 余白を埋める(拡大して切り取る)かどうか。
+//
+// 埋めるのはキーボードを出しているときだけ。キーボードは画面の半分以上を
+// 持っていくので、残った隙間に16:9のデスクトップ全体を収めると上下が真っ黒な
+// 余白になり、字も読めない大きさになる。
+//
+// マウスパネルは130px前後しか取らないうえ、狙って押すために出すものなので、
+// こちらで埋めてはいけない。縦持ちだと埋めるには3倍以上に拡大することになり、
+// デスクトップの3割ほどしか映らなくなる。カーソルが映っていない範囲へ出ると
+// 行方が分からなくなり、「動かしたのに違うところに居る」ことになる。
+export function shouldFill(h: Occlusion): boolean {
+  return h.occluded + Math.max(h.webKeyboard, h.textInput) > 0;
 }
 
 export function attachScreenLayout(
@@ -30,10 +54,13 @@ export function attachScreenLayout(
 ): ScreenLayout {
   let webKeyboardHeight = 0;
   let textInputHeight = 0;
+  let mousePadHeight = 0;
 
-  // 切り替え中にResizeObserverの通知順が前後しても、片方の閉じた通知で
-  // 開いている方のアクセサリを消さない。
-  const accessoryHeight = (): number => Math.max(webKeyboardHeight, textInputHeight);
+  // 下端のアクセサリは一度に1つしか出さないが、切り替え中にResizeObserverの
+  // 通知順が前後することがある。最大を採って、片方の閉じた通知で開いている方を
+  // 消してしまわないようにする。
+  const accessoryHeight = (): number =>
+    Math.max(webKeyboardHeight, textInputHeight, mousePadHeight);
 
   // ソフトキーボードが覆っている高さ。信用できない値は0(=覆っていない)にする。
   // 認証ダイアログやバックグラウンドで0や桁違いの値が来ることがあり、それを
@@ -60,7 +87,14 @@ export function attachScreenLayout(
     const raise = occluded + accessory;
     viewer.style.bottom = raise > 0 ? `${raise}px` : "";
     viewer.classList.toggle("keyboard-open", accessory > 0);
-    onChanged(raise > 0);
+    onChanged(
+      shouldFill({
+        occluded,
+        webKeyboard: webKeyboardHeight,
+        textInput: textInputHeight,
+        mousePad: mousePadHeight,
+      })
+    );
   };
 
   // キーボードの開閉中は何度も飛んでくるが、遅らせると表示が遅れて追従するので
@@ -76,6 +110,10 @@ export function attachScreenLayout(
     },
     setTextInputHeight(height: number): void {
       textInputHeight = height > 0 ? height : 0;
+      apply();
+    },
+    setMousePadHeight(height: number): void {
+      mousePadHeight = height > 0 ? height : 0;
       apply();
     },
     dispose(): void {
