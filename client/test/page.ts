@@ -64,10 +64,12 @@ const screen = attachScreenLayout(
 );
 const sent: object[] = [];
 // 実機と同じく🎤キーを載せた状態で測る (音声対応端末を想定)
+const kbdToggle = document.getElementById("kbd-toggle") as HTMLButtonElement;
 const kbd = new VirtualKeyboard(
   vroot,
   (m) => sent.push(m),
   (h) => screen.setWebKeyboardHeight(h),
+  (open) => kbdToggle.classList.toggle("active", open),
   true
 );
 // マウス操作パネル。キーボードの後ろに置く (実物と同じ並び順)。

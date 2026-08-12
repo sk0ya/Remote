@@ -126,6 +126,8 @@ export class VirtualKeyboard {
     // パネルの高さが変わったことの通知 (映像の表示領域をそのぶん詰めてもらう)。
     // 開閉だけでなく、画面の回転でも高さは変わる。
     private onLayout: (height: number) => void = () => {},
+    // 出ている / 引っ込めた。HUDのボタンを光らせてもらう。
+    private onOpenChange: (open: boolean) => void = () => {},
     // 音声入力に対応しているか。対応していなければ🎤キーを置かない。
     withMic = false
   ) {
@@ -285,6 +287,7 @@ export class VirtualKeyboard {
       this.repeats.stop();
       this.setLayer("abc"); // 次に開いたときは文字面から
     }
+    this.onOpenChange(!hidden);
   }
 
   // 再接続のたびに作り直されるので、古い方のDOMとタイマーは片付ける。
@@ -293,5 +296,6 @@ export class VirtualKeyboard {
     this.observer.disconnect();
     this.root.remove();
     this.onLayout(0); // 詰めていたぶんを戻す
+    this.onOpenChange(false); // 消えたパネルのぶんHUDの光りも消す
   }
 }

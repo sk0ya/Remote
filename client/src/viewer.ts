@@ -50,6 +50,7 @@ export function renderViewer(app: HTMLElement, hostId: string): void {
   const st = document.getElementById("vst")!;
   const dispBtn = document.getElementById("disp-toggle") as HTMLButtonElement;
   const micBtn = document.getElementById("mic") as HTMLButtonElement;
+  const kbdToggle = document.getElementById("kbd-toggle") as HTMLButtonElement;
   const mouseToggle = document.getElementById("mouse-toggle") as HTMLButtonElement;
   const textToggle = document.getElementById("text-toggle") as HTMLButtonElement;
   const textEntry = document.getElementById("text-entry") as HTMLFormElement;
@@ -278,7 +279,14 @@ export function renderViewer(app: HTMLElement, hostId: string): void {
       controller = new InputController(video, surface, ev.channel);
       const ctl = controller;
       keyboard?.dispose(); // 再接続で古いキーボードのDOMを残さない
-      keyboard = new VirtualKeyboard(vroot, (msg) => ctl.send(msg), onKbdLayout, voiceSupported());
+      keyboard = new VirtualKeyboard(
+        vroot,
+        (msg) => ctl.send(msg),
+        onKbdLayout,
+        // 出ているあいだはHUDのボタンを光らせる (🖱・OS⌨と同じ扱い)
+        (open) => kbdToggle.classList.toggle("active", open),
+        voiceSupported()
+      );
       mouse?.dispose();
       mouse = new MousePad(
         vroot,
@@ -319,7 +327,7 @@ export function renderViewer(app: HTMLElement, hostId: string): void {
       else ev.channel.onopen = onReady;
       // 下端のパネルは一度に1つだけ出す。2つ並べると映像に残る高さが無くなる。
       // onclick代入で再接続時の重複登録を防ぐ (addEventListenerだと2回目以降トグルが打ち消し合う)
-      (document.getElementById("kbd-toggle") as HTMLButtonElement).onclick = () => {
+      kbdToggle.onclick = () => {
         text?.close();
         mouse?.close();
         keyboard?.toggle();
