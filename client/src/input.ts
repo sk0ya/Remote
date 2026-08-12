@@ -91,6 +91,10 @@ const GAIN_MIN = 1;
 const GAIN_MAX = 3.5;
 const GAIN_FULL_SPEED = 1.2; // px/ms。この速さで上限に届く
 
+// 拡大表示でカーソルを追うとき、画面の端との間に残す余白(px)。
+// 0にすると、カーソルは映っていても進む先が見えないまま端をなぞることになる。
+const EDGE_MARGIN = 64;
+
 export function pointerGain(speed: number): number {
   if (!(speed > 0)) return GAIN_MIN;
   return Math.min(GAIN_MAX, GAIN_MIN + (GAIN_MAX - GAIN_MIN) * (speed / GAIN_FULL_SPEED));
@@ -156,10 +160,57 @@ export function toNorm(
   return { x, y };
 }
 
+// 1つの軸での、映像そのものの位置と長さ (変換前のレイアウト上の値)。
+// object-fit:contain の余白は含まない。
+export interface Span {
+  off: number;
+  len: number;
+}
+
 // 拡大時の移動量の上限。映像が表示領域からはみ出したぶんまでしか動かせない。
 // 制限しないと画面外まで放り出せてしまい、真っ黒になって戻し方が分からなくなる。
-export function clampPan(t: number, size: number, scale: number): number {
-  return Math.min(0, Math.max(size * (1 - scale), t));
+//
+// 端は「表示領域の端」ではなく「映像そのものの端」で決める。16:9のデスクトップを
+// スマホの縦長の画面に収めると上下(横持ちなら左右)に余白ができるので、表示領域を
+// 基準にすると余白のぶんだけ行き過ぎる。埋めているつもりでも映像の端が画面の内側に
+// 来てしまい、黒い帯が出る。
+export function clampPan(
+  t: number,
+  size: number,
+  scale: number,
+  image: Span = { off: 0, len: size }
+): number {
+  const min = size - (image.off + image.len) * scale; // これ以上動かすと奥が空く
+  const max = -image.off * scale; // これ以上戻すと手前が空く
+  // `|| 0` は -0 を作らないため (余白が無いと max が -0 になる)。
+  // JSONでも描画でも0と同じ扱いだが、0と食い違う値は比較で引っかかる。
+  // 拡大しても表示領域に収まりきる向きは、動かす余地が無い。中央に置く。
+  if (min > max) return (size - image.len * scale) / 2 - image.off * scale || 0;
+  return Math.min(max, Math.max(min, t)) || 0;
+}
+
+// 拡大表示のとき、指定した点が見えているように寄せた移動量。
+//
+// 埋めているあいだ映っているのはデスクトップの一部だけなので、トラックボールで
+// 動かしたカーソルはすぐ外へ出る。出た先は見えないので、PC側では動いているのに
+// こちらの画面では何も起きていないように見え、カーソルの行方が分からなくなる。
+// 端に寄ったら、指ではなく映像の方をずらして追う。
+//
+// pos は変換前(レイアウト上)の座標。margin は端との間に残す余白で、
+// これから進む先が少しは見えているようにするためのもの。
+// 映像の端まで来たら、そこで止まる (clampPan が勝つ)。
+export function panToShow(
+  t: number,
+  pos: number,
+  size: number,
+  scale: number,
+  margin: number,
+  image?: Span
+): number {
+  const m = Math.min(margin, size / 3);
+  const at = pos * scale; // 移動量を足す前の画面座標
+  const shown = Math.min(Math.max(t, m - at), size - m - at);
+  return clampPan(shown, size, scale, image);
 }
 
 // object-fit:contain で表示領域に収まるときの倍率。
@@ -190,12 +241,14 @@ export function refit(box: Box, content: Box, fill: boolean, focus?: Pt): Transf
   // 中央を見せる (端に寄せると必ず片側が切れて見えない)。
   const baseW = content.w * contain;
   const baseH = content.h * contain;
-  const focusX = focus ? (box.w - baseW) / 2 + focus.x * baseW : box.w / 2;
-  const focusY = focus ? (box.h - baseH) / 2 + focus.y * baseH : box.h / 2;
+  const spanX: Span = { off: (box.w - baseW) / 2, len: baseW };
+  const spanY: Span = { off: (box.h - baseH) / 2, len: baseH };
+  const focusX = focus ? spanX.off + focus.x * baseW : box.w / 2;
+  const focusY = focus ? spanY.off + focus.y * baseH : box.h / 2;
   return {
     scale,
-    tx: clampPan(box.w / 2 - focusX * scale, box.w, scale),
-    ty: clampPan(box.h / 2 - focusY * scale, box.h, scale),
+    tx: clampPan(box.w / 2 - focusX * scale, box.w, scale, spanX),
+    ty: clampPan(box.h / 2 - focusY * scale, box.h, scale, spanY),
   };
 }
 
@@ -286,6 +339,9 @@ export class InputController {
     const p = resyncPoint(this.cursor, this.focus);
     this.cursor = p;
     this.send({ t: "mv", x: p.x, y: p.y });
+    // 拡大表示だと、そのカーソルが今の切り取り範囲の外にあることがある
+    // (キーボードで別の場所を見ていた等)。開いた時点で映っている状態にする。
+    this.followCursor();
   }
 
   private sendNow(msg: object): void {
@@ -336,6 +392,41 @@ export class InputController {
       y: clamp01(from.y + (dy * gain) / vh),
     };
     this.outbox.move(this.cursor.x, this.cursor.y);
+    this.followCursor();
+  }
+
+  // 拡大表示のあいだ、カーソルを見えている範囲に残す。
+  //
+  // 指の位置でカーソルを決める操作 (タップ・ドラッグ) からは呼ばない。
+  // 映像を動かすと同じ指の位置が別の場所を指すことになり、動かすたびに
+  // カーソルが跳ねる。相対で動かすトラックボールにだけ効かせる。
+  private followCursor(): void {
+    if (this.scale <= 1 || !this.cursor) return;
+    const img = this.imageSpans();
+    if (!img) return;
+    // 変換前(レイアウト上)の、カーソルがある位置
+    const lx = img.x.off + this.cursor.x * img.x.len;
+    const ly = img.y.off + this.cursor.y * img.y.len;
+    const tx = panToShow(this.tx, lx, this.box.w, this.scale, EDGE_MARGIN, img.x);
+    const ty = panToShow(this.ty, ly, this.box.h, this.scale, EDGE_MARGIN, img.y);
+    if (tx === this.tx && ty === this.ty) return;
+    this.tx = tx;
+    this.ty = ty;
+    this.applyTransform();
+  }
+
+  // 変換前(レイアウト上)の、映像そのものの位置と大きさ (contain の余白は除く)。
+  // 動かせる範囲もカーソルを追う計算も、余白ではなく映像の端が基準になる。
+  private imageSpans(): { x: Span; y: Span } | null {
+    const content = { w: this.video.videoWidth, h: this.video.videoHeight };
+    const contain = fitScale(this.box, content);
+    if (!(contain > 0)) return null;
+    const w = content.w * contain;
+    const h = content.h * contain;
+    return {
+      x: { off: (this.box.w - w) / 2, len: w },
+      y: { off: (this.box.h - h) / 2, len: h },
+    };
   }
 
   // キーボード表示時に見せる位置を、クリックの完了を待たずに記録する。
@@ -363,17 +454,20 @@ export class InputController {
   }
 
   // 表示領域が変わった (キーボードの開閉・画面の回転)。
-  // fill = ソフトキーボードで領域が削られている状態。
+  // fill = 下端のトレイで領域が削られている状態。
   //
   // ここで置き直すのは領域が変わったときだけ。ユーザーがつまんで動かした
-  // 拡大・位置は、次に領域が変わるまでそのまま残る。
+  // 拡大・位置は、次に領域が変わるまでそのまま残る。キーボードとマウスパネルは
+  // 同じ高さのトレイに入っていて fill も同じなので、行き来しても何も動かない。
   relayout(fill: boolean): void {
     const next = this.videoBox();
     if (next.w === this.box.w && next.h === this.box.h && fill === this.filling) return;
     this.box = next;
     this.filling = fill;
     const content = { w: this.video.videoWidth, h: this.video.videoHeight };
-    const r = refit(next, content, fill, this.focus ?? undefined);
+    // 見せるのは「今カーソルが居るところ」。まだ動かしていなければ直前に
+    // 触れたところを使う (resyncPoint と同じ順序で選ぶ)。
+    const r = refit(next, content, fill, resyncPoint(this.cursor, this.focus));
     this.scale = r.scale;
     this.tx = r.tx;
     this.ty = r.ty;
@@ -480,8 +574,9 @@ export class InputController {
         this.ty += mid.y - prevMid.y + (prevMid.y - this.ty) * (1 - newScale / this.scale);
         this.scale = newScale;
         // はみ出したぶんより先へは動かさない (画面外へ放り出して見失わない)
-        this.tx = clampPan(this.tx, this.box.w, this.scale);
-        this.ty = clampPan(this.ty, this.box.h, this.scale);
+        const img = this.imageSpans();
+        this.tx = clampPan(this.tx, this.box.w, this.scale, img?.x);
+        this.ty = clampPan(this.ty, this.box.h, this.scale, img?.y);
         this.applyTransform();
         this.twoFingerStart = { mid, dist, time: this.twoFingerStart.time };
       } else {

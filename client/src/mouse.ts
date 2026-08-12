@@ -82,6 +82,8 @@ export function scrollNotches(dx: number, dy: number): { dx: number; dy: number 
 export class MousePad {
   private root: HTMLElement;
   private holdKey: HTMLButtonElement | null = null;
+  // 押しっぱなしで喋るキー。押下の扱いは持たず、VoiceInput に渡して使ってもらう。
+  private mic: HTMLButtonElement | null = null;
   private holding = false;
   private observer: ResizeObserver;
 
@@ -92,11 +94,13 @@ export class MousePad {
     // 開閉だけでなく、画面の回転でも高さは変わる。
     private onLayout: (height: number) => void = () => {},
     // 出ている / 引っ込めた。映像へのタッチの扱いを切り替えてもらう。
-    private onOpenChange: (open: boolean) => void = () => {}
+    private onOpenChange: (open: boolean) => void = () => {},
+    // 音声入力に対応しているか。対応していなければ🎤キーを置かない。
+    withMic = false
   ) {
     this.root = document.createElement("div");
     this.root.className = "kbd mousepad hidden";
-    this.root.appendChild(this.build());
+    this.root.appendChild(this.build(withMic));
     container.appendChild(this.root);
 
     // 高さは開閉だけでなく回転でも変わるので、実測を購読する
@@ -105,16 +109,32 @@ export class MousePad {
     this.observer.observe(this.root);
   }
 
-  private build(): HTMLElement {
+  private build(withMic: boolean): HTMLElement {
     const body = document.createElement("div");
     body.className = "mousepad-body";
+
+    // 左の列は上から 🎤 / なぞる面。トレイの高さはキーボードに合わせてあるので、
+    // なぞる面の上には余白が残る。押しっぱなしで喋るキーはそこへ置く —
+    // 映像の上に浮かぶ🎤はパネルを出すと引っ込むので、代わりが要る。
+    // 押下・離しの扱いは VoiceInput が持つので、ここではボタンを作るだけ。
+    const left = document.createElement("div");
+    left.className = "mouse-left";
+    if (withMic) {
+      const mic = document.createElement("button");
+      mic.type = "button";
+      mic.className = "mouse-key mouse-mic";
+      mic.textContent = "🎤";
+      this.mic = mic;
+      left.appendChild(mic);
+    }
 
     const pad = document.createElement("div");
     pad.className = "mouse-scroll";
     pad.innerHTML = `<span class="mouse-scroll-mark" aria-hidden="true"></span>
       <span class="mouse-scroll-label">スクロール</span>`;
     this.attachScroll(pad);
-    body.appendChild(pad);
+    left.appendChild(pad);
+    body.appendChild(left);
 
     const keys = document.createElement("div");
     keys.className = "mouse-keys";
@@ -223,8 +243,19 @@ export class MousePad {
     this.holdKey.classList.toggle("active", this.holding);
   }
 
+  // 押しっぱなしで喋るキー。押下の扱いを持たないので、VoiceInput に繋いでもらう。
+  micButton(): HTMLButtonElement | null {
+    return this.mic;
+  }
+
   get open(): boolean {
     return !this.root.classList.contains("hidden");
+  }
+
+  // 掴んだままにしない。タブを閉じられるときなど、パネルはそのままで
+  // 押しっぱなしだけを解きたい場面のために外へ出してある。
+  release(): void {
+    this.releaseHold();
   }
 
   close(): void {

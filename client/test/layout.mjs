@@ -116,6 +116,26 @@ function near(a, b, tol, what) {
   ok(Math.abs(a - b) <= tol, what, `${a.toFixed(1)} と ${b.toFixed(1)} が ${tol}px 以上ちがう`);
 }
 
+// 埋めた映像が表示領域を覆いきっているか。以前は動かせる範囲を表示領域の端で
+// 決めていたので、16:9を縦長の画面に収めたときの余白のぶんだけ行き過ぎて、
+// 埋めているはずなのに下に黒い帯が出ていた。
+function covers(m) {
+  return (
+    m.content.x <= 1 &&
+    m.content.y <= 1 &&
+    m.content.x + m.content.w >= m.box.w - 1 &&
+    m.content.y + m.content.h >= m.box.h - 1
+  );
+}
+
+function coverage(m) {
+  return (
+    `映像 ${m.content.x.toFixed(0)},${m.content.y.toFixed(0)} ` +
+    `${m.content.w.toFixed(0)}x${m.content.h.toFixed(0)} / ` +
+    `領域 ${m.box.w.toFixed(0)}x${m.box.h.toFixed(0)}`
+  );
+}
+
 async function run(page, name, width, height) {
   await page.call("Emulation.setDeviceMetricsOverride", {
     width,
@@ -163,12 +183,10 @@ async function run(page, name, width, height) {
   const osOpen = await page.evaluate("JSON.stringify(window.test.measure())").then(JSON.parse);
   ok(osOpen.textEntry, `${name}: OSキーボード表示中に入力欄が消えている`);
   near(osOpen.viewer.h, osOpen.textEntry.y, 1, `${name}: OS入力欄が映像の上に重なっている`);
-  near(
-    osOpen.textEntry.bottom,
-    height - osOccluded - 8,
-    1,
-    `${name}: OS入力欄がOSキーボード直上にない`
-  );
+  near(osOpen.textEntry.bottom, height - osOccluded, 1, `${name}: OS入力欄がOSキーボード直上にない`);
+  // キーボード・マウスパネルと同じトレイに収まっていること (端が揃う)
+  near(osOpen.textEntry.x, 0, 1, `${name}: OS入力欄の左端が他のパネルと揃っていない`);
+  near(osOpen.textEntry.w, width, 1, `${name}: OS入力欄の幅が他のパネルと揃っていない`);
   ok(!osOpen.micShown, `${name}: OSキーボード表示中にマイクが残っている`);
   const osFocused = await page.evaluate(
     `window.test.transformedScreenPoint(${focus.x}, ${focus.y})`
@@ -247,12 +265,12 @@ async function run(page, name, width, height) {
     (await page.evaluate(`window.test.topIdAt(${width / 2}, ${height / 2})`)) === "playgate",
     `${name}: 再生ボタンが操作面の裏に隠れている`
   );
-  // 出ているあいだも切断ボタンは押せること (HUDはこれより手前)
-  const exitId = await page.evaluate(`(() => {
-    const r = document.getElementById("exit").getBoundingClientRect();
+  // 出ているあいだもHUDのボタンは押せること (HUDはこれより手前)
+  const hudId = await page.evaluate(`(() => {
+    const r = document.getElementById("kbd-toggle").getBoundingClientRect();
     return window.test.topIdAt(r.x + r.width / 2, r.y + r.height / 2);
   })()`);
-  ok(exitId === "exit", `${name}: 再生ボタンが切断ボタンを覆っている`, exitId);
+  ok(hudId === "kbd-toggle", `${name}: 再生ボタンがHUDのボタンを覆っている`, hudId);
   await page.evaluate("window.test.showPlayGate(false)");
 
   // 2. 画面内キーボードを開いた状態にする
@@ -393,6 +411,8 @@ async function run(page, name, width, height) {
     `映像 ${open.content.w.toFixed(0)}x${open.content.h.toFixed(0)} / ` +
       `領域 ${open.box.w.toFixed(0)}x${open.box.h.toFixed(0)}`
   );
+  // 埋めた映像が領域を覆いきっていること (端に黒い帯を残さない)
+  ok(covers(open), `${name}: キーボードを出すと映像の端に黒い帯が残る`, coverage(open));
   // はみ出したぶんは指で動かせること (動かせないと見たいところを出せない)
   ok(open.transform !== "none", `${name}: 埋めたのに動かす余地が無い`);
   ok(
@@ -418,26 +438,22 @@ async function run(page, name, width, height) {
   const mouse = await page.evaluate("JSON.stringify(window.test.measure())").then(JSON.parse);
   const parts = await page.evaluate("JSON.stringify(window.test.mouseParts())").then(JSON.parse);
   ok(mouse.panel, `${name}: マウスパネルが出ていない`);
-  // キーボードより低いこと。映像を潰してまで置くものではない。
-  ok(
-    mouse.panel.h < open.panel.h,
-    `${name}: マウスパネルがキーボードより高い`,
-    `${mouse.panel.h.toFixed(0)}px / キーボード ${open.panel.h.toFixed(0)}px`
-  );
   ok(mouse.box.h > 40, `${name}: マウスパネルで映像の領域が潰れている`, `${mouse.box.h}px`);
-  // キーボードと違い、こちらは拡大して切り取らないこと。狙って押すために出す
-  // パネルなのに一部しか見えないと、カーソルが見えない範囲へ出て行方が分からなくなる。
+  // キーボードと同じ枠に収まっていること。高さや見え方が中身で変わると、
+  // 切り替えるたびに映像が伸び縮みして、見ている場所を見失う。
+  near(mouse.panel.h, open.panel.h, 1, `${name}: マウスパネルとキーボードで高さが違う`);
+  near(mouse.panel.x, open.panel.x, 1, `${name}: パネルの左端が揃っていない`);
+  near(mouse.panel.w, open.panel.w, 1, `${name}: パネルの幅が揃っていない`);
+  near(mouse.box.h, open.box.h, 1, `${name}: パネルを替えると映像の領域が変わる`);
+  near(mouse.content.h, open.content.h, 1, `${name}: パネルを替えると映像の大きさが変わる`);
+  near(mouse.content.y, open.content.y, 1, `${name}: パネルを替えると映像の位置が動く`);
+  // キーボードと同じく、残った領域を余白なく使うこと
   ok(
-    mouse.transform === "none",
-    `${name}: マウスパネルを出すと映像が拡大・切り取り表示になる`,
-    mouse.transform
+    mouse.content.w >= mouse.box.w * 0.95 && mouse.content.h >= mouse.box.h * 0.95,
+    `${name}: マウスパネルを出すと余白ばかりになる`,
+    coverage(mouse)
   );
-  ok(
-    mouse.content.w <= mouse.box.w + 1 && mouse.content.h <= mouse.box.h + 1,
-    `${name}: マウスパネルを出すと映像がはみ出す`,
-    `映像 ${mouse.content.w.toFixed(0)}x${mouse.content.h.toFixed(0)} / ` +
-      `領域 ${mouse.box.w.toFixed(0)}x${mouse.box.h.toFixed(0)}`
-  );
+  ok(covers(mouse), `${name}: マウスパネルを出すと映像の端に黒い帯が残る`, coverage(mouse));
 
   // 開いた時点で、手元のカーソル位置をPC側へ言い切って合わせること。
   // ずれたまま相対で動かし始めると、最初のひとなぞりでカーソルが飛ぶ。
@@ -487,6 +503,19 @@ async function run(page, name, width, height) {
     `${name}: なぞる面が狭い`,
     `${parts.pad.w.toFixed(0)}x${parts.pad.h.toFixed(0)}px`
   );
+  // 映像の上に浮かぶ🎤はパネルを出すと引っ込むので、こちらに代わりが要る
+  // (無いとパネルを出しているあいだ喋る手段が無くなる)
+  ok(below(parts.pad, parts.mic), `${name}: 🎤がなぞる面の上に無い`);
+  ok(
+    parts.mic.h >= 44 && parts.mic.w >= 60,
+    `${name}: マウスパネルの🎤が押しっぱなしにしづらい大きさ`,
+    `${parts.mic.w.toFixed(0)}x${parts.mic.h.toFixed(0)}px`
+  );
+  // 🎤の押下はVoiceInputが持つ。ここで操作まで送ると二重に反応する。
+  await page.evaluate("window.test.takeDcSent()");
+  await page.evaluate('window.test.pressKey("🎤")');
+  const padMic = await page.evaluate("JSON.stringify(window.test.takeDcSent())").then(JSON.parse);
+  ok(padMic.length === 0, `${name}: マウスパネルの🎤が操作を送っている`, JSON.stringify(padMic));
 
   // 出しているあいだ、映像をなぞってもカーソルが動くだけでクリックにならない。
   // 押す場所を決められないと、右クリックもつまみも狙って出せない。
@@ -509,29 +538,64 @@ async function run(page, name, width, height) {
   // カーソルにすると1pxの指の動きが5px飛び、小さいボタンは狙えない。
   const lastMove = (msgs) => msgs.filter((m) => m.t === "mv").at(-1);
   await page.evaluate("window.test.takeDcSent()");
-  await page.evaluate("window.test.tapScreen(0.2, 0.2)");
+  // 埋めているあいだデスクトップは一部しか映っていないので、押す場所は
+  // ホスト画面の座標ではなく、実際に見えている画面の側で指定する。
+  const touched = await page
+    .evaluate("JSON.stringify(window.test.tapVisible(0.35, 0.4))")
+    .then(JSON.parse);
   await new Promise((r) => setTimeout(r, 60));
   const jumped = lastMove(
     await page.evaluate("JSON.stringify(window.test.takeDcSent())").then(JSON.parse)
   );
-  ok(
-    jumped && Math.abs(jumped.x - 0.2) < 0.02 && Math.abs(jumped.y - 0.2) < 0.02,
-    `${name}: パネル表示中のタップでその位置へ飛ばない`,
-    JSON.stringify(jumped)
-  );
+  ok(jumped, `${name}: パネル表示中のタップがホストへ届かない`);
+  if (jumped) {
+    // 送った座標が、押したところに見えていたものと同じか (逆から確かめる)
+    const shown = await page.evaluate(
+      `window.test.transformedScreenPoint(${jumped.x}, ${jumped.y})`
+    );
+    near(shown.x, touched.x, 2, `${name}: パネル表示中のタップでその位置へ飛ばない`);
+    near(shown.y, touched.y, 2, `${name}: パネル表示中のタップでその位置へ飛ばない`);
+  }
 
   // なぞったときは指の位置へ飛ばず、動かしたぶんだけ今の位置から動く。
-  // (0.8→0.9 をなぞる = 画面の1割ぶん。飛んでいれば0.9付近に出る)
-  await page.evaluate("window.test.dragScreen({x:0.8,y:0.8},{x:0.9,y:0.9})");
+  // 同じところを2回なぞって見分ける — 指の位置へ飛んでいるなら2回とも同じ座標に
+  // 出るが、トラックボールなら2回目はそのぶんさらに進む。
+  const rub = async () => {
+    await page.evaluate("window.test.dragScreen({x:0.8,y:0.8},{x:0.9,y:0.9})");
+    await new Promise((r) => setTimeout(r, 60));
+    return lastMove(
+      await page.evaluate("JSON.stringify(window.test.takeDcSent())").then(JSON.parse)
+    );
+  };
+  const nudged = await rub();
+  const nudgedAgain = await rub();
+  ok(
+    nudged && nudgedAgain && nudged.x !== jumped.x && nudgedAgain.x - nudged.x > 0.01,
+    `${name}: なぞるとトラックボールにならず指の位置へ飛ぶ`,
+    JSON.stringify({ jumped, nudged, nudgedAgain })
+  );
+
+  // 拡大して切り取っているあいだ、トラックボールで大きく動かしても
+  // カーソルは見えている範囲に残ること (映像の方がずれて追う)。
+  // 映っていない範囲へ出ると、PC側では動いているのにこちらの画面では何も
+  // 起きていないように見えて、カーソルの行方が分からなくなる。
+  for (let i = 0; i < 6; i++) {
+    await page.evaluate("window.test.dragScreen({x:0.4,y:0.4},{x:0.6,y:0.6})");
+  }
   await new Promise((r) => setTimeout(r, 60));
-  const nudged = lastMove(
+  const far = lastMove(
     await page.evaluate("JSON.stringify(window.test.takeDcSent())").then(JSON.parse)
   );
-  ok(
-    nudged && nudged.x > 0.2 && nudged.x < 0.6,
-    `${name}: なぞるとトラックボールにならず指の位置へ飛ぶ`,
-    JSON.stringify(nudged)
-  );
+  ok(far, `${name}: なぞってもカーソルが動かない`);
+  if (far) {
+    const at = await page.evaluate(`window.test.transformedScreenPoint(${far.x}, ${far.y})`);
+    // 端まで動かすと、映像の端そのものが表示領域の端に来る (1pxは丸めの幅)
+    ok(
+      at.x >= -1 && at.x <= mouse.box.w + 1 && at.y >= -1 && at.y <= mouse.box.h + 1,
+      `${name}: なぞるとカーソルが映っていない範囲へ出る`,
+      JSON.stringify({ cursor: far, at, box: mouse.box })
+    );
+  }
 
   // なぞる面。矢印ボタンだと1回1ノッチで、長い文書は連射待ちになる。
   const totalWheel = (msgs, axis) =>

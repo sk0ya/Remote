@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import { Outbox, refit, clampPan, toNorm, pointerGain, resyncPoint } from "./input";
+import { Outbox, refit, clampPan, panToShow, toNorm, pointerGain, resyncPoint } from "./input";
 import type { Box, Pt, Rect } from "./input";
 
 // 送信を記録し、rAF相当のスケジュールを手動で進められるOutboxを作る。
@@ -146,18 +146,18 @@ describe("refit", () => {
     expect(refit({ w: 1920, h: 1080 }, HD, true)).toEqual({ scale: 1, tx: 0, ty: 0 });
   });
 
-  it("フォーカス位置を表示領域の中央へ移動する", () => {
-    const r = refit({ w: 390, h: 423 }, HD, true, { x: 0.5, y: 0.8 });
-    expect(r.scale).toBeCloseTo(1.929);
-    // 中央のxはそのまま、下側のフォーカスに合わせて上へパンする。
-    expect(r.tx).toBeCloseTo(-181, 1);
-    expect(r.ty).toBeCloseTo(-323.2, 1);
+  // 縦持ちで埋めると、はみ出すのは横だけ (デスクトップの高さは全部映っている)。
+  // 縦にも動かすと映像の下端が画面の内側へ入り、黒い帯が出るだけになる。
+  it("フォーカス位置を、動かせる向きだけ表示領域の中央へ寄せる", () => {
+    const r = refit({ w: 390, h: 423 }, HD, true, { x: 0.4, y: 0.8 });
+    expect(r.tx).toBeCloseTo(-105.8, 1); // 左寄りのフォーカスが中央へ来る
+    expect(r.ty).toBeCloseTo(-196.3, 1); // 縦は動かしようがない
   });
 
-  it("端のフォーカスは映像の端を超えてパンしない", () => {
+  it("端のフォーカスでも映像の端を超えてパンしない", () => {
     const r = refit({ w: 390, h: 423 }, HD, true, { x: 0, y: 0 });
     expect(r.tx).toBe(0);
-    expect(r.ty).toBe(0);
+    expect(r.ty).toBeCloseTo(-196.3, 1);
   });
 });
 
@@ -265,6 +265,52 @@ describe("clampPan", () => {
   it("等倍のときは動かせない", () => {
     expect(clampPan(-50, 800, 1)).toBe(0);
     expect(clampPan(50, 800, 1)).toBe(0);
+  });
+
+  // 16:9のデスクトップを縦長の画面に収めると上下に余白ができる。表示領域の端で
+  // 止めると余白のぶんだけ行き過ぎ、埋めているのに黒い帯が出る。
+  // (400pxの領域に、上下100pxの余白を置いて200pxの映像がある状態)
+  it("余白ではなく映像の端で止める", () => {
+    const image = { off: 100, len: 200 };
+    expect(clampPan(-600, 400, 3, image)).toBe(-500); // 奥は映像の下端まで
+    expect(clampPan(0, 400, 3, image)).toBe(-300); // 手前は映像の上端まで
+    expect(clampPan(-400, 400, 3, image)).toBe(-400); // その間はそのまま
+  });
+
+  it("拡大しても収まりきる向きは中央に置く", () => {
+    // 300pxに広げても400pxの領域には収まる = 動かす余地が無い
+    expect(clampPan(-999, 400, 1.5, { off: 100, len: 200 })).toBe(-100);
+  });
+});
+
+// 埋めているあいだ映っているのはデスクトップの一部だけなので、トラックボールで
+// 動かしたカーソルはすぐ切り取りの外へ出る。出た先は見えず、PC側では動いて
+// いるのにこちらでは何も起きていないように見えるので、映像の方をずらして追う。
+// (領域800px・2倍 = 中身1600px。動かせる範囲は -800〜0)
+describe("panToShow", () => {
+  it("見えているうちは動かさない", () => {
+    expect(panToShow(0, 100, 800, 2, 64)).toBe(0); // 画面上200px
+    expect(panToShow(-200, 200, 800, 2, 64)).toBe(-200); // 画面上200px
+  });
+
+  it("端に寄ったら、余白を残すところまで追う", () => {
+    expect(panToShow(0, 400, 800, 2, 64)).toBe(-64); // 奥へ出る手前で止める
+    expect(panToShow(-400, 150, 800, 2, 64)).toBe(-236); // 手前側も同じ
+  });
+
+  it("映像の端まで来たらそこで止まる", () => {
+    // 余白を残そうとしても、その先には映像が無い (黒い帯を出す方が困る)
+    expect(panToShow(0, 780, 800, 2, 64)).toBe(-800);
+    expect(panToShow(-400, 10, 800, 2, 64)).toBe(0);
+  });
+
+  it("等倍のときは動かさない", () => {
+    expect(panToShow(0, 100, 800, 1, 64)).toBe(0);
+  });
+
+  // 狭い領域で余白を取りすぎると、寄せ先が左右の端で食い合って動きが暴れる。
+  it("余白は領域の1/3までにする", () => {
+    expect(panToShow(0, 60, 120, 2, 64)).toBe(-40); // 余白は64pxではなく40px
   });
 });
 

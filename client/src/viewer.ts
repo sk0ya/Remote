@@ -31,7 +31,6 @@ export const VIEWER_HTML = `
           <button class="ghost icon" id="mouse-toggle" title="マウス操作パネル">🖱</button>
           <button class="ghost" id="kbd-toggle" title="Webアプリのキーボード">Web⌨</button>
           <button class="ghost text-input-toggle" id="text-toggle" style="display:none" title="スマホOSのキーボード">OS⌨</button>
-          <button class="ghost" id="exit">切断</button>
         </span>
       </div>
       <button class="mic" id="mic" style="display:none">🎤</button>
@@ -43,7 +42,7 @@ export const VIEWER_HTML = `
       </form>
     </div>`;
 
-export function renderViewer(app: HTMLElement, hostId: string, onExit: () => void): void {
+export function renderViewer(app: HTMLElement, hostId: string): void {
   app.innerHTML = VIEWER_HTML;
   const video = document.getElementById("screen") as HTMLVideoElement;
   const surface = document.getElementById("surface")!;
@@ -107,6 +106,7 @@ export function renderViewer(app: HTMLElement, hostId: string, onExit: () => voi
     clearTimeout(viewTimer);
     document.removeEventListener("visibilitychange", onVisibility);
     window.removeEventListener("resize", onResize);
+    window.removeEventListener("pagehide", onPageHide);
     screen.dispose();
     voice?.dispose();
     voice = null;
@@ -120,10 +120,18 @@ export function renderViewer(app: HTMLElement, hostId: string, onExit: () => voi
     pc = null;
     ch.close();
   };
-  document.getElementById("exit")!.addEventListener("click", () => {
-    cleanup();
-    onExit();
-  });
+  // 切断ボタンは置いていない。狭くなった映像の上でいちばん押してほしくないものが
+  // 場所を取るため。終わるときはタブを閉じるか再読み込みする (読み込み直すと
+  // ホーム画面に戻る)。
+  //
+  // 閉じられた時点で、掴んだままの左ボタンだけは必ず離す。残すとPC側は以後の
+  // 操作がすべてドラッグになり、画面を見ても原因が分からない。
+  function onPageHide(e: PageTransitionEvent): void {
+    mouse?.release();
+    // bfcacheに載るだけなら戻ってこられるので、接続は畳まない
+    if (!e.persisted) cleanup();
+  }
+  window.addEventListener("pagehide", onPageHide);
 
   // ホストへ「実際に表示できる大きさ」を伝える。ホストはこれを上限に縮小して
   // から送るので、スマホは表示に必要なぶんだけデコードすれば済む。
@@ -281,7 +289,8 @@ export function renderViewer(app: HTMLElement, hostId: string, onExit: () => voi
           ctl.setCursorOnly(open);
           mouseToggle.classList.toggle("active", open);
           if (open) toast("タップで移動 / なぞって微調整 → ボタンで押す");
-        }
+        },
+        voiceSupported()
       );
       text?.dispose();
       text = new TextInput(
@@ -319,14 +328,16 @@ export function renderViewer(app: HTMLElement, hostId: string, onExit: () => voi
         mouse?.toggle();
       };
       // 音声入力 (対応ブラウザのみ。ボタンのハンドラはプロパティ代入なので再接続でも重複しない)
-      // 映像の上に浮かぶ🎤と、キーボードの🎤キーの両方から同じ録音を動かす。
-      // キーボードを出すと前者は引っ込むので、出していても喋れるようにする。
+      // 映像の上に浮かぶ🎤と、キーボード・マウスパネルの🎤キーから同じ録音を動かす。
+      // 下端のトレイを出すと浮かぶ方は引っ込むので、どちらを出していても喋れるようにする。
       if (voiceSupported()) {
         micBtn.style.display = "";
         voice?.dispose();
-        const kbdMic = keyboard.micButton();
+        const mics = [micBtn, keyboard.micButton(), mouse.micButton()].filter(
+          (b): b is HTMLButtonElement => !!b
+        );
         voice = new VoiceInput(
-          kbdMic ? [micBtn, kbdMic] : [micBtn],
+          mics,
           (msg) => ctl.send(msg),
           (buf) => ctl.sendBinary(buf),
           () => ctl.buffered,

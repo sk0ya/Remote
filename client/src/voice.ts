@@ -39,9 +39,9 @@ export class VoiceInput {
   private startedAt = 0;
   private idleTimer = 0;
 
-  // 喋るボタンは複数ある。映像の上に浮かぶ🎤と、画面内キーボードの🎤キー。
-  // キーボードを出すと前者は引っ込む(狭い映像を隠さないため)ので、どちらの
-  // 状態でも喋れるように両方から同じ録音を動かす。
+  // 喋るボタンは複数ある。映像の上に浮かぶ🎤と、画面内キーボード・マウスパネルの
+  // 🎤キー。下端のトレイを出すと前者は引っ込む(狭い映像を隠さないため)ので、
+  // どれを出していても喋れるように、すべてから同じ録音を動かす。
   constructor(
     private btns: HTMLButtonElement[],
     private send: Send,

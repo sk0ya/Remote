@@ -5,7 +5,6 @@
 // Unicode文字列としてホストへ渡す。
 
 type Send = (msg: object) => void;
-const TEXT_ENTRY_GAP = 8;
 
 export class TextInput {
   private open = false;
@@ -28,8 +27,10 @@ export class TextInput {
     this.observer.observe(form);
   }
 
+  // 入力欄はキーボード・マウスパネルと同じトレイに収まっている (画面の端まで
+  // 届き、下端に張り付く)。隙間ぶんは足さず、実測の高さがそのまま映像を詰める量。
   private reportLayout(): void {
-    this.onLayout(this.open ? this.form.offsetHeight + TEXT_ENTRY_GAP : 0);
+    this.onLayout(this.open ? this.form.offsetHeight : 0);
   }
 
   private toggle = (): void => {

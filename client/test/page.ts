@@ -71,11 +71,13 @@ const kbd = new VirtualKeyboard(
   true
 );
 // マウス操作パネル。キーボードの後ろに置く (実物と同じ並び順)。
+// 実機と同じく🎤キーを載せた状態で測る (音声対応端末を想定)。
 const mouse = new MousePad(
   vroot,
   (m) => controller.send(m), // 実物と同じくOutbox経由でホストへ出す
   (h) => screen.setMousePadHeight(h),
-  (open) => controller.setCursorOnly(open)
+  (open) => controller.setCursorOnly(open),
+  true
 );
 const textToggle = document.getElementById("text-toggle") as HTMLButtonElement;
 const textEntry = document.getElementById("text-entry") as HTMLFormElement;
@@ -112,6 +114,19 @@ function screenPoint(x: number, y: number): { x: number; y: number } {
     x: r.left + (r.width - video.videoWidth * s) / 2 + video.videoWidth * s * x,
     y: r.top + (r.height - video.videoHeight * s) / 2 + video.videoHeight * s * y,
   };
+}
+
+function tapAt(p: { x: number; y: number }): void {
+  const init = {
+    bubbles: true,
+    cancelable: true,
+    pointerId: 42,
+    pointerType: "touch",
+    clientX: p.x,
+    clientY: p.y,
+  };
+  surface.dispatchEvent(new PointerEvent("pointerdown", init));
+  surface.dispatchEvent(new PointerEvent("pointerup", init));
 }
 
 function transformedScreenPoint(x: number, y: number): { x: number; y: number } {
@@ -237,6 +252,7 @@ Object.assign(window, {
         body: at(".mousepad:not(.hidden) .mousepad-body"),
         pad: at(".mouse-scroll"),
         keys: at(".mouse-keys"),
+        mic: at(".mouse-mic"),
         left: byLabel("左"),
         right: byLabel("右"),
         hold: at(".mouse-hold"),
@@ -261,16 +277,15 @@ Object.assign(window, {
     },
     tapScreen(x: number, y: number) {
       const p = screenPoint(x, y);
-      const init = {
-        bubbles: true,
-        cancelable: true,
-        pointerId: 42,
-        pointerType: "touch",
-        clientX: p.x,
-        clientY: p.y,
-      };
-      surface.dispatchEvent(new PointerEvent("pointerdown", init));
-      surface.dispatchEvent(new PointerEvent("pointerup", init));
+      tapAt(p);
+    },
+    // 見えている範囲の (fx,fy) の位置を押して、押した画面座標を返す。
+    // 拡大・切り取り表示ではホスト画面のどこが映っているかが倍率とパンで
+    // 変わるので、ホスト側の座標では「実際に押せる場所」を指定できない。
+    tapVisible(fx: number, fy: number) {
+      const p = { x: video.clientWidth * fx, y: video.clientHeight * fy };
+      tapAt(p);
+      return p;
     },
     // 2本指のピンチ。(cx,cy)を中心に、指の間隔を from → to へ変える。
     pinch(cx: number, cy: number, from: number, to: number) {

@@ -4,6 +4,29 @@
   box-sizing: border-box;
 }
 
+/* 画面の下端に出すもの(画面内キーボード・マウス操作パネル・OSキーボード用の
+   入力欄)の寸法。3つは同じ「トレイ」に収める — 切り替えるのは中身だけで、
+   端の位置も背景も高さも動かさない。
+   高さはキーボードの段数から組む。キーボードがいちばん高さを要るので、
+   これがトレイの高さになる (マウスパネルは同じ枠の下側へ寄せて置く)。 */
+:root {
+  --key-h: 46px;
+  --key-gap: 4px;
+  --tray-pad-x: 5px;
+  --tray-pad-y: 5px;
+  /* 操作段を文字面から離すぶん (.kbd-ops の margin-top と同じ値) */
+  --tray-ops-gap: 4px;
+  /* 縦持ちは 文字面3段 + 操作段2段 */
+  --tray-rows: 5;
+  --tray-bg: rgba(17, 19, 24, 0.94);
+  /* マウスパネルの「押す物・なぞる面」の高さ (トレイの高さとは別に決める) */
+  --mousepad-h: 116px;
+  --tray-h: calc(
+    var(--tray-rows) * var(--key-h) + (var(--tray-rows) - 1) * var(--key-gap) +
+      var(--tray-ops-gap) + 2 * var(--tray-pad-y) + env(safe-area-inset-bottom, 0px)
+  );
+}
+
 html,
 body {
   height: 100%;
@@ -203,20 +226,32 @@ input.field {
   border-color: #3b6cf5;
 }
 
-/* スマホ標準キーボードの直上に出す入力欄。--viewport-occlusion-bottom は
-   visualViewportからscreen.tsが更新するので、iOS/Androidでもキーボードに隠れない。 */
+/* 下端のトレイ。中身(キーボード / マウスパネル / OS用の入力欄)が入れ替わっても、
+   左右の端・背景・上端の線は動かさない。位置は画面基準(fixed)で、
+   --viewport-occlusion-bottom は visualViewport から screen.ts が更新するので、
+   iOS/Androidでも下に潜らない。 */
+.kbd,
 .text-entry {
   position: fixed;
-  left: 8px;
-  right: 8px;
-  bottom: calc(var(--viewport-occlusion-bottom, 0px) + 8px);
+  left: 0;
+  right: 0;
+  bottom: var(--viewport-occlusion-bottom, 0px);
+  background: var(--tray-bg);
+  /* 映像との境目。線を引くと高さが変わるので影で出す。 */
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06);
+  /* 隙間はキーの幅から直接引かれる (10列だと4pxでも幅の1割)。
+     指で押せる大きさを優先して、余白は詰める。 */
+  padding: var(--tray-pad-y) var(--tray-pad-x)
+    calc(var(--tray-pad-y) + env(safe-area-inset-bottom, 0px));
+}
+
+/* スマホ標準キーボードの直上に出す入力欄。
+   ここだけはトレイの高さ(--tray-h)に揃えない — 下にOSのキーボードが控えていて、
+   キーボード5段ぶんを足すと映像に残る高さが無くなる。 */
+.text-entry {
   z-index: 12;
   display: flex;
-  gap: 6px;
-  padding: 6px;
-  border: 1px solid #2a3348;
-  border-radius: 10px;
-  background: rgba(17, 19, 24, 0.94);
+  gap: var(--key-gap);
 }
 
 .text-entry[hidden] {
@@ -291,22 +326,19 @@ input.field {
 
 /* ソフトキーボードを出すと、映像に使える高さは画面の半分以下しか残らない。
    このパネルはそこからさらに削る側なので、余白も文字も詰めて低く保つ。
-   文字面(3段)+操作段(2段)の5段で、どちらの面に切り替えても高さは変わらない。 */
-/* キーボードの直上に置く。ビューアの中にあるが位置は画面基準 (fixed) で、
-   ビューアの下端が上がってもパネルはキーボードに張り付いたまま。 */
+   文字面(3段)+操作段(2段)の5段で、どちらの面に切り替えても高さは変わらない。
+
+   高さは中身ではなく --tray-h で決める。マウスパネルも同じ枠に入るので、
+   キーボードと行き来しても映像の下端が動かない (中身の高さのままにすると、
+   切り替えのたびに映像が100px以上伸び縮みして、見ている場所を見失う)。
+   中身は下端へ寄せる — 押すものは親指の届く下にあってほしい。 */
 .kbd {
-  position: fixed;
-  left: 0;
-  right: 0;
-  bottom: var(--viewport-occlusion-bottom, 0px);
   z-index: 10;
-  background: rgba(17, 19, 24, 0.92);
-  /* 隙間はキーの幅から直接引かれる (10列だと4pxでも幅の1割)。
-     指で押せる大きさを優先して、余白は詰める。 */
-  padding: 5px 5px calc(5px + env(safe-area-inset-bottom, 0));
+  min-height: var(--tray-h);
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  justify-content: flex-end;
+  gap: var(--key-gap);
 }
 
 .kbd.hidden {
@@ -317,7 +349,7 @@ input.field {
 .kbd-layer {
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: var(--key-gap);
 }
 
 .kbd-layer[hidden] {
@@ -329,15 +361,15 @@ input.field {
 .kbd-ops {
   display: flex;
   flex-direction: column;
-  gap: 4px;
-  margin-top: 4px;
+  gap: var(--key-gap);
+  margin-top: var(--tray-ops-gap);
 }
 
 /* 段の中の幅の比は grid-template-columns をJSから入れて決める
    (キーの増減で崩れるnth-childの指定を使わない)。 */
 .kbd-row {
   display: grid;
-  gap: 4px;
+  gap: var(--key-gap);
 }
 
 .kbd-key {
@@ -346,7 +378,9 @@ input.field {
   border-radius: 7px;
   background: #252c3a;
   color: #f2f4f8;
-  min-height: 46px;
+  /* min-height ではなく実寸で決める。--tray-h はこの高さ×段数で組んであるので、
+     中身が1pxでも伸びるとトレイの高さと食い違う。 */
+  height: var(--key-h);
   /* grid の 1fr は中身の最小幅で押し広げられるので、明示的に潰れさせる */
   min-width: 0;
   padding: 0 2px;
@@ -395,24 +429,51 @@ input.field {
    形で役割を分ける — 面はなぞる物、角の丸い四角は押す物。実物のマウスを模した
    絵や刻みは置かない (小さく描いたところで押しにくいだけで、何が起きるかは
    結局ラベルを読んで知ることになる)。
-   キーボードと同じ .kbd の上に載せるが、キー1つ1つの見た目は別に持つ。 */
-.mousepad {
-  background: rgba(13, 15, 21, 0.94);
-  padding: 10px 12px calc(10px + env(safe-area-inset-bottom, 0));
+   キーボードと同じトレイ(.kbd)に載せる。背景も左右の端もそちらに従い、
+   ここで持つのはキー1つ1つの見た目だけ。 */
+
+/* トレイはキーボードに合わせて高いので、中身の上には余白が残る。
+   ここを埋めて押すキーを大きくはしない — 押す物が下に集まっていた方が親指で
+   届くし、キーボードから切り替えても指の行き先が変わらない。
+   余白は左の列(🎤)が受け取る。押しっぱなしで喋るものなので、広い方が握りやすい。 */
+.mousepad-body {
+  flex: 1;
+  display: flex;
+  align-items: flex-end;
+  gap: 10px;
 }
 
-/* 高さはここで決めて、中身は伸び縮みして分け合う。 */
-.mousepad-body {
+/* 左の列: 上に🎤、下になぞる面 */
+.mouse-left {
+  flex: 1;
+  align-self: stretch;
   display: flex;
-  align-items: stretch;
+  flex-direction: column;
+  justify-content: flex-end;
   gap: 10px;
-  height: 116px;
+  min-width: 0;
+}
+
+/* 押しっぱなしで喋るキー。映像の上に浮かぶ🎤はパネルを出すと引っ込むので、
+   出しているあいだはこちらを使う。押している最中に長押しの選択・スクロール・
+   コールアウトが起きないよう、押す物とは別に指の扱いを止める。 */
+.mouse-mic {
+  flex: 1;
+  min-height: 44px;
+  font-size: 24px;
+  touch-action: none;
+  -webkit-touch-callout: none;
+}
+
+.mouse-mic.active {
+  background: #3b6cf5;
 }
 
 /* なぞる面。1回1ノッチの矢印ボタンだと長い文書は連射待ちになる。
    一段沈めて、押す物と間違えないようにする。 */
 .mouse-scroll {
-  flex: 1;
+  height: var(--mousepad-h);
+  flex: none;
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -468,6 +529,7 @@ input.field {
 /* 押す物。左を大きく取り、右・つまむ・ダブルを同じ大きさで並べる。 */
 .mouse-keys {
   flex: 2.15;
+  height: var(--mousepad-h);
   display: grid;
   grid-template-columns: 1.25fr 1fr;
   grid-auto-rows: 1fr;
@@ -523,10 +585,14 @@ input.field {
   border-color: #3b6cf5;
 }
 
-/* 幅の狭い端末では1キーが細くなるので、その手前で文字と高さを詰める */
+/* 幅の狭い端末では1キーが細くなるので、その手前で文字と高さを詰める。
+   高さは --key-h で下げる (トレイの高さもこれに追従する)。 */
 @media (max-width: 400px) {
+  :root {
+    --key-h: 44px;
+  }
+
   .kbd-key {
-    min-height: 44px;
     font-size: 17px;
   }
 
@@ -542,23 +608,23 @@ input.field {
 /* 横向きは縦の余裕が少ないため、映像を残すことを優先する。
    幅は余っているので、操作段2つを横に並べて1段ぶん映像へ返す (計4段)。 */
 @media (orientation: landscape) and (max-height: 480px) {
-  .kbd {
-    padding: 4px 6px calc(4px + env(safe-area-inset-bottom, 0));
-    gap: 4px;
+  :root {
+    --key-h: 34px;
+    --tray-pad-x: 6px;
+    --tray-pad-y: 4px;
+    --tray-ops-gap: 2px;
+    /* 操作段2つが横に並ぶので、文字面3段+操作段1段の4段 */
+    --tray-rows: 4;
+    --mousepad-h: 84px;
   }
 
   .kbd-ops {
     flex-direction: row;
-    margin-top: 2px;
   }
 
   /* 横持ちは縦の余裕が無い。幅は余っているので、詰めるのは高さだけでよい。 */
-  .mousepad {
-    padding: 7px 10px calc(7px + env(safe-area-inset-bottom, 0));
-  }
-
-  .mousepad-body {
-    height: 84px;
+  .mousepad-body,
+  .mouse-left {
     gap: 8px;
   }
 
@@ -573,7 +639,6 @@ input.field {
   }
 
   .kbd-key {
-    min-height: 34px;
     font-size: 16px;
   }
 

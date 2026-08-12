@@ -166,7 +166,7 @@ function renderHome(hostId: string): void {
     route();
   });
   document.getElementById("connect")!.addEventListener("click", () => {
-    renderViewer(app, hostId, route);
+    renderViewer(app, hostId);
   });
 }
 
