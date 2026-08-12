@@ -137,6 +137,8 @@ function coverage(m) {
 }
 
 async function run(page, name, width, height) {
+  // 縦持ちと横持ちでマウスパネルの段の組み方が変わる (帯を出すか畳むか)
+  const portrait = height > width;
   await page.call("Emulation.setDeviceMetricsOverride", {
     width,
     height,
@@ -477,13 +479,29 @@ async function run(page, name, width, height) {
   }
   const rightOf = (a, b) => a.x >= b.x + b.w - 1; // aがbの右にある
   const below = (a, b) => a.y >= b.y + b.h - 1;
-  // なぞる面と押すキーは場所で分ける。混ざると、なぞるつもりが押してしまう。
-  ok(rightOf(parts.keys, parts.pad), `${name}: なぞる面と押すキーが分かれていない`);
+  // 段ごとに役目を分ける — 上がなぞる物、下が押す物。混ざると、なぞるつもりが
+  // 押してしまう。押す物は左・右・ダブルの順で、いちばん使う左が下段の左端。
+  ok(below(parts.left, parts.pad), `${name}: なぞる面と押すキーが上下に分かれていない`);
   ok(
-    rightOf(parts.right, parts.left) && below(parts.hold, parts.left),
-    `${name}: 左・右・つまむの並びが崩れている`
+    rightOf(parts.right, parts.left) && rightOf(parts.dbl, parts.right),
+    `${name}: 左・右・ダブルの並びが崩れている`
   );
-  ok(rightOf(parts.dbl, parts.hold), `${name}: ダブルがつまみの右に無い`);
+  // つまみは押しても戻らない唯一のキー。押す物と同じ形で同じ段に並べると、
+  // 押したあとも効いていることに気づけない。
+  if (portrait) {
+    ok(
+      below(parts.hold, parts.pad) && below(parts.left, parts.hold),
+      `${name}: つまみが面と押す物のあいだに無い`
+    );
+    ok(
+      parts.hold.w > parts.left.w * 1.5,
+      `${name}: つまみが幅いっぱいの帯になっていない`,
+      `${parts.hold.w.toFixed(0)}px / 左 ${parts.left.w.toFixed(0)}px`
+    );
+  } else {
+    // 横持ちは縦の余裕が無いので帯を畳み、押す物の段の端へ置く
+    ok(rightOf(parts.hold, parts.dbl), `${name}: つまみがダブルの右に無い`);
+  }
   // 一番よく押すものが一番大きいこと
   ok(
     parts.left.w > parts.right.w,
@@ -504,8 +522,10 @@ async function run(page, name, width, height) {
     `${parts.pad.w.toFixed(0)}x${parts.pad.h.toFixed(0)}px`
   );
   // 映像の上に浮かぶ🎤はパネルを出すと引っ込むので、こちらに代わりが要る
-  // (無いとパネルを出しているあいだ喋る手段が無くなる)
-  ok(below(parts.pad, parts.mic), `${name}: 🎤がなぞる面の上に無い`);
+  // (無いとパネルを出しているあいだ喋る手段が無くなる)。
+  // 押す物の段には入れない — 喋るのとクリックを並べると押し間違える。
+  ok(rightOf(parts.pad, parts.mic), `${name}: 🎤がなぞる面の左に無い`);
+  ok(below(parts.left, parts.mic), `${name}: 🎤が押す物と同じ段にある`);
   ok(
     parts.mic.h >= 44 && parts.mic.w >= 60,
     `${name}: マウスパネルの🎤が押しっぱなしにしづらい大きさ`,

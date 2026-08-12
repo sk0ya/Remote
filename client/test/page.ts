@@ -260,7 +260,6 @@ Object.assign(window, {
       return {
         body: at(".mousepad:not(.hidden) .mousepad-body"),
         pad: at(".mouse-scroll"),
-        keys: at(".mouse-keys"),
         mic: at(".mouse-mic"),
         left: byLabel("左"),
         right: byLabel("右"),

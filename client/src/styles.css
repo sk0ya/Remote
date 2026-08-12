@@ -19,9 +19,10 @@
   /* 縦持ちは 文字面3段 + 操作段2段 */
   --tray-rows: 5;
   --tray-bg: rgba(17, 19, 24, 0.94);
-  /* マウスパネルの「押す物・なぞる面」の高さ (トレイの高さとは別に決める) */
-  --mousepad-h: 116px;
-  --mouse-mic-h: 56px;
+  /* マウスパネルの中の隙間と角の丸み。面とキーの大きさは段の比で決まるので、
+     ここでは持たない (トレイの高さが変われば中身もそのぶん伸び縮みする)。 */
+  --mouse-gap: 8px;
+  --mouse-radius: 15px;
   --tray-h: calc(
     var(--tray-rows) * var(--key-h) + (var(--tray-rows) - 1) * var(--key-gap) +
       var(--tray-ops-gap) + 2 * var(--tray-pad-y) + env(safe-area-inset-bottom, 0px)
@@ -427,90 +428,164 @@ input.field {
 }
 
 /* マウス操作パネル。
-   形で役割を分ける — 面はなぞる物、角の丸い四角は押す物。実物のマウスを模した
-   絵や刻みは置かない (小さく描いたところで押しにくいだけで、何が起きるかは
-   結局ラベルを読んで知ることになる)。
-   キーボードと同じトレイ(.kbd)に載せる。背景も左右の端もそちらに従い、
-   ここで持つのはキー1つ1つの見た目だけ。 */
+   形で役割を分ける — 面はなぞる物、帯は入り切りの物、角の丸い四角は押す物。
+   実物のマウスを模した絵や刻みは置かない (小さく描いたところで押しにくい
+   だけで、何が起きるかは結局ラベルを読んで知ることになる)。
+   キーボードと同じトレイ(.kbd)に載せる。背景も左右の端もそちらに従う。 */
 
-/* 操作面とボタンの大きさは抑え、内部の隙間だけを詰める。 */
-.mousepad {
-  /* 外側の固定トレイは残し、マウス専用の見た目の枠だけを中身に合わせる。 */
-  background: transparent;
-  box-shadow: none;
-}
-
+/* 段ごとに役目が違う (上から なぞる物 / 状態 / 押す物)。置き場所は
+   grid-template-areas に集める — 縦持ちの3段と横持ちの2段が、CSSの
+   その1か所を見れば分かるようにしておく。
+   中身はトレイいっぱいに広げる。トレイの高さはキーボードに合わせてあるので、
+   下に固めると上に黒い帯が残るだけで、そのぶん指の当たる面が狭くなる。
+   伸びるのは上側だけなので、下端＝親指の届く位置は変わらない。 */
 .mousepad-body {
-  flex: none;
-  height: var(--mousepad-h);
-  display: flex;
-  align-items: flex-end;
-  gap: 6px;
-  background: var(--tray-bg);
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06);
-  border-radius: 16px;
-}
-
-.mousepad-body.has-mic {
-  height: calc(var(--mousepad-h) + var(--mouse-mic-h) + 6px);
-}
-
-/* 左の列: 上に🎤、下になぞる面 */
-.mouse-left {
   flex: 1;
-  align-self: stretch;
-  display: flex;
-  flex-direction: column;
-  justify-content: flex-end;
-  gap: 6px;
-  min-width: 0;
+  min-height: 0;
+  display: grid;
+  gap: var(--mouse-gap);
+  /* 9列。押す物の幅の比 (左4 : 右3 : ダブル2) をこれで作る —
+     いちばんよく押す左がいちばん広い。 */
+  grid-template-columns: repeat(9, 1fr);
+  grid-template-rows: 1.75fr 0.75fr 1fr;
+  grid-template-areas:
+    "pad pad pad pad pad pad pad pad pad"
+    "hld hld hld hld hld hld hld hld hld"
+    "lft lft lft lft rgt rgt rgt dbl dbl";
+}
+
+/* 🎤を置くときだけ、なぞる面の左を2列ぶん空ける */
+.mousepad-body.has-mic {
+  grid-template-areas:
+    "mic mic pad pad pad pad pad pad pad"
+    "hld hld hld hld hld hld hld hld hld"
+    "lft lft lft lft rgt rgt rgt dbl dbl";
+}
+
+.mouse-scroll {
+  grid-area: pad;
+}
+
+.mouse-mic {
+  grid-area: mic;
+}
+
+.mouse-hold {
+  grid-area: hld;
+}
+
+.mouse-primary {
+  grid-area: lft;
+}
+
+.mouse-right {
+  grid-area: rgt;
+}
+
+.mouse-double {
+  grid-area: dbl;
 }
 
 /* 押しっぱなしで喋るキー。映像の上に浮かぶ🎤はパネルを出すと引っ込むので、
    出しているあいだはこちらを使う。押している最中に長押しの選択・スクロール・
    コールアウトが起きないよう、押す物とは別に指の扱いを止める。
-   大きさは映像の上に浮かぶ🎤と同じ56px。列の余白ぶんは伸ばさない —
-   押しっぱなしで喋るのに要るのは親指1本ぶんで、それ以上は他のキーとの
-   釣り合いを崩すだけ。 */
+   なぞる面と同じ高さの縦長にする — 押す物の段には入れない (喋るのと
+   クリックは別の話で、並べると押し間違える)。 */
 .mouse-mic {
-  flex: none;
-  height: var(--mouse-mic-h);
-  font-size: 22px;
+  font-size: 26px;
   touch-action: none;
   -webkit-touch-callout: none;
 }
 
 .mouse-mic.active {
   background: #3b6cf5;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.18),
+    0 0 0 1px rgba(96, 134, 255, 0.55),
+    0 4px 14px rgba(59, 108, 245, 0.35);
 }
 
 /* なぞる面。1回1ノッチの矢印ボタンだと長い文書は連射待ちになる。
-   一段沈めて、押す物と間違えないようにする。 */
+   押す物が浮いているのに対して、こちらは掘る — 影の向きが逆なら、
+   触る前に「押す物ではない」と手が分かる。 */
 .mouse-scroll {
-  height: var(--mousepad-h);
-  flex: none;
+  position: relative;
   display: flex;
   flex-direction: column;
   align-items: center;
   justify-content: center;
   gap: 7px;
   min-width: 0;
-  border-radius: 18px;
-  background: rgba(0, 0, 0, 0.32);
-  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.06);
+  min-height: 0;
+  border-radius: var(--mouse-radius);
+  background-color: rgba(0, 0, 0, 0.34);
+  /* 横縞。指を当てる面だと形で分かるうえに、縞の間隔は1ノッチぶん(12px)なので、
+     どれだけなぞれば何行送るのかが目盛りとして読める。 */
+  background-image: repeating-linear-gradient(
+    180deg,
+    rgba(255, 255, 255, 0.035) 0 1px,
+    transparent 1px 12px
+  );
+  box-shadow:
+    inset 0 1px 3px rgba(0, 0, 0, 0.55),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.05);
   color: #7c869e;
+  transition:
+    background 110ms ease,
+    color 110ms ease,
+    box-shadow 110ms ease;
   /* なぞるので、指の動きをブラウザ側に取られないようにする */
   touch-action: none;
   user-select: none;
   -webkit-user-select: none;
   -webkit-touch-callout: none;
+  -webkit-tap-highlight-color: transparent;
+}
+
+/* 上下の矢羽根。面のどこを触っても効くが、縦になぞる物だと形で言っておく
+   (印と字だけだと、ただの説明書きに見えて触られない)。 */
+.mouse-scroll::before,
+.mouse-scroll::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  width: 9px;
+  height: 9px;
+  border-left: 2px solid currentColor;
+  border-top: 2px solid currentColor;
+  border-radius: 1px;
+  opacity: 0.32;
+}
+
+.mouse-scroll::before {
+  top: 11px;
+  transform: translateX(-50%) rotate(45deg);
+}
+
+.mouse-scroll::after {
+  bottom: 11px;
+  transform: translateX(-50%) rotate(-135deg);
 }
 
 /* なぞっているあいだ色を持ち上げる。ノッチが出ているかは映像の方を見ないと
    分からないので、少なくとも「触れている」ことは手元で返す。 */
 .mouse-scroll.rubbing {
-  background: rgba(59, 108, 245, 0.2);
+  background-color: rgba(59, 108, 245, 0.22);
   color: #c3d0f4;
+  box-shadow:
+    inset 0 1px 3px rgba(0, 0, 0, 0.35),
+    inset 0 0 0 1px rgba(96, 134, 255, 0.45);
+}
+
+.mouse-scroll.rubbing::before,
+.mouse-scroll.rubbing::after {
+  opacity: 0.6;
+}
+
+/* なぞらずに離した = 中クリック。画面は動かないので、押せたことは面で返す。 */
+.mouse-scroll.pressed {
+  background-color: rgba(59, 108, 245, 0.32);
+  color: #dde5ff;
 }
 
 /* ホイールのついたマウスの輪郭。スクロールの印として広く通じる形。 */
@@ -541,24 +616,23 @@ input.field {
   letter-spacing: 0.06em;
 }
 
-/* 押す物。左を大きく取り、右・つまむ・ダブルを同じ大きさで並べる。 */
-.mouse-keys {
-  flex: 2.15;
-  height: var(--mousepad-h);
-  display: grid;
-  grid-template-columns: 1.25fr 1fr;
-  grid-auto-rows: 1fr;
-  gap: 6px;
-  min-width: 0;
+/* 面を押すと中クリック、は形からは分からない。使えることを字で置いておく
+   (この面のためだけに中クリックのボタンを並べずに済ませている)。 */
+.mouse-scroll-hint {
+  font-size: 10px;
+  letter-spacing: 0.02em;
+  opacity: 0.6;
 }
 
+/* 押す物は浮かせる。上端の細い明かりと下の影で、平らな面から起き上がって
+   見えるようにする (色を足さずに「押せる」と分かる)。 */
 .mouse-key {
   appearance: none;
   border: none;
-  border-radius: 18px;
-  background: rgba(255, 255, 255, 0.08);
+  border-radius: var(--mouse-radius);
+  background: linear-gradient(180deg, #2c3446 0%, #232a39 100%);
   color: #e9ecf3;
-  font-size: 16px;
+  font-size: 17px;
   font-weight: 600;
   letter-spacing: 0.02em;
   line-height: 1;
@@ -567,29 +641,96 @@ input.field {
   white-space: nowrap;
   overflow: hidden;
   cursor: pointer;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.07),
+    0 1px 2px rgba(0, 0, 0, 0.4);
   touch-action: manipulation;
   user-select: none;
   -webkit-user-select: none;
   -webkit-touch-callout: none;
-  transition: background 90ms ease;
+  -webkit-tap-highlight-color: transparent;
+  transition:
+    background 90ms ease,
+    box-shadow 90ms ease,
+    transform 90ms ease;
 }
 
-/* いちばん使うものだけ一段明るくする。色は足さない (増やすほど何が主役か
-   分からなくなる)。 */
+/* いちばん使うものだけ一段明るくし、字も大きくする。色は足さない
+   (色は「つまんだまま」を出すために取ってある — 増やすほど効かなくなる)。 */
 .mouse-primary {
+  background: linear-gradient(180deg, #3a445c 0%, #2d354a 100%);
+  font-size: 21px;
+}
+
+.mouse-right,
+.mouse-double {
+  font-size: 18px;
+}
+
+/* 押した手応え。指の下は見えないので、沈む向きの影と縁の明かりで返す。
+   `.pressed` はJSが付ける — pointerdownでブラウザの既定を止めているぶん、
+   :active はタッチだと出ないことがある (出ない端末では押しても何も起きない
+   ように見えて、届いたか分からないまま二度押しになる)。 */
+.mouse-key.pressed {
+  background: linear-gradient(180deg, #455070 0%, #39425c 100%);
+  box-shadow:
+    inset 0 1px 3px rgba(0, 0, 0, 0.45),
+    inset 0 0 0 1px rgba(96, 134, 255, 0.5);
+  transform: translateY(1px);
+}
+
+/* つまみは押すと状態が残る唯一のキー。押す物と同じ形にすると、押したあとも
+   効いていることに気づけない — 幅いっぱいの帯にして、押す物の段から外す。
+   消えているあいだは浮かせず、線で囲っただけの入り切りの見た目にする。 */
+.mouse-hold {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  background: rgba(255, 255, 255, 0.035);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.09);
+  color: #aeb7c9;
+  font-size: 15px;
+  letter-spacing: 0.08em;
+}
+
+/* 入り切りのしるし。字だけだと「つまむ」が命令なのか状態なのか分からない。
+   消えている / 点いている、の2つしかない物なので、玉ひとつで足りる。 */
+.mouse-hold::before {
+  content: "";
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
   background: rgba(255, 255, 255, 0.14);
-  font-size: 19px;
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.18);
+  transition:
+    background 140ms ease,
+    box-shadow 140ms ease;
 }
 
-.mouse-key:active {
-  background: rgba(255, 255, 255, 0.24);
-}
-
-/* つまみは押すと状態が残る唯一のキー。掴んでいるあいだだけ色を使う。 */
+/* 掴んでいるあいだ。掴みっぱなしに気づかないまま映像を触ると、以後の操作が
+   全部ドラッグになる — 止まっていても目に入るよう、帯ごと色を変えて光らせる。 */
 .mouse-hold.active,
-.mouse-hold.active:active {
-  background: #3b6cf5;
+.mouse-hold.active.pressed {
+  background: linear-gradient(180deg, #4d7aff 0%, #3b6cf5 100%);
   color: #fff;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.22),
+    0 0 0 1px rgba(96, 134, 255, 0.55),
+    0 4px 16px rgba(59, 108, 245, 0.4);
+  transform: none;
+}
+
+.mouse-hold.active::before {
+  background: #fff;
+  box-shadow: 0 0 9px rgba(255, 255, 255, 0.85);
+}
+
+/* 押した瞬間だけ。帯は浮いていないので、沈める代わりに縁を明るくする。 */
+.mouse-hold.pressed {
+  background: rgba(255, 255, 255, 0.1);
+  box-shadow: inset 0 0 0 1px rgba(96, 134, 255, 0.5);
+  transform: none;
 }
 
 .kbd-key.active,
@@ -630,27 +771,58 @@ input.field {
     --tray-ops-gap: 2px;
     /* 操作段2つが横に並ぶので、文字面3段+操作段1段の4段 */
     --tray-rows: 4;
-    --mousepad-h: 84px;
-    --mouse-mic-h: 44px;
+    --mouse-gap: 6px;
+    --mouse-radius: 13px;
   }
 
   .kbd-ops {
     flex-direction: row;
   }
 
-  /* 横持ちは縦の余裕が無い。幅は余っているので、詰めるのは高さだけでよい。 */
+  /* 横持ちは縦の余裕が無い。3段のままだと帯もなぞる面も指1本ぶんを割るので、
+     帯を畳んで押す物と同じ段の端へ置く (2段)。幅は余っているので、
+     どれも押せる大きさのまま収まる。🎤も1列で足りる。 */
   .mousepad-body,
-  .mouse-left {
-    gap: 6px;
+  .mousepad-body.has-mic {
+    grid-template-rows: 1.6fr 1fr;
+    grid-template-areas:
+      "mic pad pad pad pad pad pad pad pad"
+      "lft lft lft rgt rgt dbl dbl hld hld";
   }
 
-  .mouse-keys {
-    gap: 6px;
+  .mousepad-body:not(.has-mic) {
+    grid-template-areas:
+      "pad pad pad pad pad pad pad pad pad"
+      "lft lft lft rgt rgt dbl dbl hld hld";
   }
 
-  /* 縦に詰まるので🎤も一回り小さくする (指1本ぶんは残す)。 */
-  .mouse-mic {
-    height: var(--mouse-mic-h);
+  /* 帯ではなく押す物の段に入るので、見た目も押す物に戻す。掴んだままかどうかは
+     色と「はなす」の字で出る (入り切りの玉は帯のための物なので落とす)。 */
+  .mouse-hold {
+    background: linear-gradient(180deg, #2c3446 0%, #232a39 100%);
+    box-shadow:
+      inset 0 1px 0 rgba(255, 255, 255, 0.07),
+      0 1px 2px rgba(0, 0, 0, 0.4);
+    color: #e9ecf3;
+    font-size: 18px;
+    letter-spacing: 0.02em;
+  }
+
+  .mouse-hold::before {
+    display: none;
+  }
+
+  /* なぞる面は平たく広くなる。縦に積むと字が上下に潰れるので、印と字は横に
+     並べ替える (幅は余っている)。 */
+  .mouse-scroll {
+    flex-direction: row;
+    gap: 10px;
+  }
+
+  /* 上下の矢羽根は面の高さが要る。潰れた面に載せると字と重なるので畳む。 */
+  .mouse-scroll::before,
+  .mouse-scroll::after {
+    display: none;
   }
 
   /* flex-grow は段の合計幅をJSから入れてある。段をまたいでキー幅が揃う。 */

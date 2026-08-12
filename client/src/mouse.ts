@@ -7,18 +7,30 @@
 //   狙った操作が出るかどうかが指の速さと角度の運になってしまう。
 //   出したボタンを押すぶんには外しようがない。
 //
-// 置き方:
-//   ┌──────────┐ ┌──────────┬────────┐
-//   │          │ │    左    │   右   │
-//   │  スクロール  │ ├──────────┼────────┤
-//   │  (なぞる面) │ │  つまむ   │  ダブル │
-//   └──────────┘ └──────────┴────────┘
+// 置き方 (縦持ち):
+//   ┌────┬────────────────────────┐
+//   │ 🎤 │  スクロール (なぞる面)      │  なぞる物
+//   ├────┴────────────────────────┤
+//   │        つまむ / はなす         │  状態
+//   ├──────────┬─────────┬────────┤
+//   │    左     │    右    │  ダブル  │  押す物
+//   └──────────┴─────────┴────────┘
+//
+//   横に3段。上から「なぞる物」「状態」「押す物」で、段ごとに役目が違う。
+//   段が違えば形も違うので、どれが何なのかは触る前に分かる — 面は掘って
+//   あって指を滑らせる物、帯は入り切りの物、下の3つは押す物。
+//   よく押す物ほど下にある (下端が親指にいちばん近い)。
 //
 //   スクロールは矢印ボタンではなく「なぞる面」にしてある。1回1ノッチの
 //   ボタンだと長い文書は連射待ちになるし、押す物と回す物が同じ形で並ぶと
-//   どれが何なのか見て分からない。面はなぞる物、角の丸い四角は押す物、と
-//   形で分ける。面をなぞらずに離したときだけ中クリック (本物のホイールを
-//   押すのと同じ) なので、中クリックのためのボタンは要らない。
+//   どれが何なのか見て分からない。面をなぞらずに離したときだけ中クリック
+//   (本物のホイールを押すのと同じ) なので、中クリックのためのボタンは要らない。
+//
+//   「つまむ」だけは押しても戻らない — 掴んだままになる。押す物に混ぜると
+//   押したあとも効いていることに気づけないので、幅いっぱいの帯にして押す物と
+//   分け、掴んでいるあいだは色を変えて出しておく。
+//
+//   横持ちは縦の余裕が無いので、帯を畳んで押す物と同じ段の端に置く (2段)。
 //
 // 分担:
 //   映像 = カーソルを動かすところ / パネル = 押す・つまむ・回す
@@ -47,11 +59,12 @@ export const MOUSE_KEYS = {
   middle: { label: "中", click: { b: 1 } },
 } as const satisfies Record<string, MouseKey>;
 
-// 画面に出す順 (grid の流し込み順と同じ)
-const KEY_ORDER = [MOUSE_KEYS.left, MOUSE_KEYS.right, MOUSE_KEYS.hold, MOUSE_KEYS.double];
+// 画面に出す順 (上から。置き場所そのものは grid-template-areas が決める)
+const KEY_ORDER = [MOUSE_KEYS.hold, MOUSE_KEYS.left, MOUSE_KEYS.right, MOUSE_KEYS.double];
 
-// スクロール面の効き。12pxごとに1ノッチなら、面(約116px)を1回なぞって
+// スクロール面の効き。12pxごとに1ノッチなら、面(約120px)を1回なぞって
 // 約10ノッチ = 30行。指を離さずになぞり続ければいくらでも送れる。
+// 面の横縞(styles.css)はこの間隔で引いてあるので、変えるならあちらも直す。
 export const SCROLL_PX_PER_NOTCH = 12;
 
 // 指の移動量(px) → ノッチ数。
@@ -79,9 +92,15 @@ export function scrollNotches(dx: number, dy: number): { dx: number; dy: number 
   return { dx: notch(-dx), dy: notch(dy) };
 }
 
+// 押したキーを光らせておく長さ。タップは50msほどで離れるので、離したら消す
+// 作りだと光ったことに気づけない。
+const FLASH_MS = 130;
+
 export class MousePad {
   private root: HTMLElement;
   private holdKey: HTMLButtonElement | null = null;
+  // 光らせている物と、消すためのタイマー (連打で消し忘れないよう持っておく)
+  private flashing = new Map<HTMLElement, number>();
   // 押しっぱなしで喋るキー。押下の扱いは持たず、VoiceInput に渡して使ってもらう。
   private mic: HTMLButtonElement | null = null;
   private holding = false;
@@ -109,46 +128,48 @@ export class MousePad {
     this.observer.observe(this.root);
   }
 
+  // 中身は1枚のgridに直に並べる。どこに置くかはCSS (grid-template-areas) が
+  // 持つので、縦持ちの3段と横持ちの2段を、同じ組み立てのまま入れ替えられる。
   private build(withMic: boolean): HTMLElement {
     const body = document.createElement("div");
     body.className = "mousepad-body";
-    if (withMic) body.classList.add("has-mic");
 
-    // 左の列は上から 🎤 / なぞる面。トレイの高さはキーボードに合わせてあるので、
-    // なぞる面の上には余白が残る。押しっぱなしで喋るキーはそこへ置く —
-    // 映像の上に浮かぶ🎤はパネルを出すと引っ込むので、代わりが要る。
+    // 映像の上に浮かぶ🎤はパネルを出すと引っ込むので、ここに代わりを置く
+    // (無いと出しているあいだ喋れない)。なぞる面の左に、面より細く縦長で —
+    // 形が違えば、なぞっている指がうっかり乗ることはない。
     // 押下・離しの扱いは VoiceInput が持つので、ここではボタンを作るだけ。
-    const left = document.createElement("div");
-    left.className = "mouse-left";
     if (withMic) {
       const mic = document.createElement("button");
       mic.type = "button";
       mic.className = "mouse-key mouse-mic";
       mic.textContent = "🎤";
       this.mic = mic;
-      left.appendChild(mic);
+      body.classList.add("has-mic"); // 🎤のぶん、なぞる面の左を空ける
+      body.appendChild(mic);
     }
 
     const pad = document.createElement("div");
     pad.className = "mouse-scroll";
+    // 「押せば中クリック」は形からは分からないので字で置く。これを読めば、
+    // 中クリックのためだけのボタンが無いことに気づかずに済む。
     pad.innerHTML = `<span class="mouse-scroll-mark" aria-hidden="true"></span>
-      <span class="mouse-scroll-label">スクロール</span>`;
+      <span class="mouse-scroll-label">スクロール</span>
+      <span class="mouse-scroll-hint">タップで中クリック</span>`;
     this.attachScroll(pad);
-    left.appendChild(pad);
-    body.appendChild(left);
+    body.appendChild(pad);
 
-    const keys = document.createElement("div");
-    keys.className = "mouse-keys";
-    for (const k of KEY_ORDER) keys.appendChild(this.makeKey(k));
-    body.appendChild(keys);
+    for (const k of KEY_ORDER) body.appendChild(this.makeKey(k));
     return body;
   }
 
   private makeKey(k: MouseKey): HTMLButtonElement {
     const btn = document.createElement("button");
     btn.type = "button";
+    // class は見た目だけでなく置き場所も決める (CSS側の grid-area)
     btn.className = "mouse-key";
     if (k === MOUSE_KEYS.left) btn.classList.add("mouse-primary");
+    if (k === MOUSE_KEYS.right) btn.classList.add("mouse-right");
+    if (k === MOUSE_KEYS.double) btn.classList.add("mouse-double");
     if (k.hold) {
       btn.classList.add("mouse-hold");
       this.holdKey = btn;
@@ -156,10 +177,28 @@ export class MousePad {
     btn.textContent = k.label;
     btn.addEventListener("pointerdown", (e) => {
       e.preventDefault(); // フォーカスを奪わない
+      this.flash(btn);
       if (k.hold) this.toggleHold();
       else this.fire(k);
     });
     return btn;
+  }
+
+  // 押した手応え。指で隠れているキーの色が変わっても見えないので、離した
+  // あとに残る形にする — 押した瞬間に消える表示は「押せていない」に見える。
+  //
+  // 離したときではなく時間で戻す。操作はpointerdownの時点で送り終えているので、
+  // 押しっぱなしにしても続きは無い (光らせ続けると、まだ効いているように見える)。
+  private flash(el: HTMLElement): void {
+    el.classList.add("pressed");
+    clearTimeout(this.flashing.get(el));
+    this.flashing.set(
+      el,
+      window.setTimeout(() => {
+        el.classList.remove("pressed");
+        this.flashing.delete(el);
+      }, FLASH_MS)
+    );
   }
 
   // なぞる面。縦にも横にも回せる。
@@ -198,7 +237,12 @@ export class MousePad {
       pad.addEventListener(ev, () => {
         // なぞらずに離した = ホイールを押した。中クリックのためだけの
         // ボタンを並べずに済む (使う頻度のわりに場所を取る)。
-        if (drag && !drag.moved && ev === "pointerup") this.fire(MOUSE_KEYS.middle);
+        if (drag && !drag.moved && ev === "pointerup") {
+          this.fire(MOUSE_KEYS.middle);
+          // なぞったときと違って画面はぴくりとも動かない。押す物ではない面を
+          // 押したのだから、効いたことは面の側で返す。
+          this.flash(pad);
+        }
         drag = null;
         pad.classList.remove("rubbing");
       });
@@ -210,6 +254,9 @@ export class MousePad {
     // つまんだまま別のボタンを押されると、押しっぱなしの左ボタンと混ざって
     // 何が起きたのか追えなくなる。先に離してから押す。
     this.releaseHold();
+    // 押した合図。PC側で何が起きたかは映像が届くまで分からないので、
+    // 送ったことだけは手元で返す (見ているのは映像で、手元ではない)。
+    navigator.vibrate?.(10);
     for (let i = 0; i < (k.click.times ?? 1); i++) {
       this.send({ t: "dn", b: k.click.b });
       this.send({ t: "up", b: k.click.b });
@@ -220,6 +267,7 @@ export class MousePad {
   private toggleHold(): void {
     if (this.holding) {
       this.releaseHold();
+      navigator.vibrate?.(20); // 掴んだときと同じく、離したことも手に返す
       return;
     }
     this.holding = true;
@@ -274,6 +322,8 @@ export class MousePad {
   // 再接続のたびに作り直されるので、古い方のDOMとタイマーは片付ける。
   dispose(): void {
     this.releaseHold();
+    for (const t of this.flashing.values()) clearTimeout(t);
+    this.flashing.clear();
     this.observer.disconnect();
     this.root.remove();
     this.onLayout(0); // 詰めていたぶんを戻す
