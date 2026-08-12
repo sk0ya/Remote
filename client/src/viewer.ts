@@ -23,7 +23,7 @@ export const VIEWER_HTML = `
     <div class="viewer" id="vroot">
       <video id="screen" autoplay playsinline muted></video>
       <div class="surface" id="surface"></div>
-      <button class="playgate" id="playgate" hidden>▶ タップして再生</button>
+      <button class="playgate" id="playgate" hidden>▶ 画面をタップして表示</button>
       <div class="hud">
         <span id="vst" class="status">接続中...</span>
         <span class="hud-btns">
