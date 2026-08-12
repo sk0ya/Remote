@@ -1,6 +1,15 @@
 import { describe, it, expect, vi } from "vitest";
-import { Outbox, refit, clampPan, panToShow, toNorm, pointerGain, resyncPoint } from "./input";
-import type { Box, Pt, Rect } from "./input";
+import {
+  Outbox,
+  refit,
+  keepView,
+  clampPan,
+  panToShow,
+  toNorm,
+  pointerGain,
+  resyncPoint,
+} from "./input";
+import type { Box, Pt, Rect, Transform } from "./input";
 
 // 送信を記録し、rAF相当のスケジュールを手動で進められるOutboxを作る。
 function makeOutbox() {
@@ -158,6 +167,89 @@ describe("refit", () => {
     const r = refit({ w: 390, h: 423 }, HD, true, { x: 0, y: 0 });
     expect(r.tx).toBe(0);
     expect(r.ty).toBeCloseTo(-196.3, 1);
+  });
+});
+
+// 下端のトレイを出したまま、その高さだけが変わる場面。
+// 画面内キーボードとマウスパネルは同じ高さだが、OSキーボードを使うときは
+// その上に出せるのが入力欄1行ぶんだけになる (キーボードのぶんが下から削られる)。
+// ここで refit のように置き直すと、倍率も見ている場所も作り直されるので、
+// 3つを行き来するたびに映像が伸び縮みして飛ぶ。
+describe("keepView", () => {
+  const KBD = { w: 390, h: 594 }; // 画面内キーボード / マウスパネルを出した領域
+  const OS = { w: 390, h: 495 }; // OSキーボード + その上の入力欄
+
+  const contain = (box: Box): number => Math.min(box.w / HD.w, box.h / HD.h);
+  // 映像1pxを画面何pxで描いているか (これが変わる = 映像が伸び縮みして見える)
+  const magOf = (box: Box, t: Transform): number => t.scale * contain(box);
+  // 描かれている映像そのものの矩形 (object-fit:contain の余白は含まない)
+  const drawn = (box: Box, t: Transform) => {
+    const c = contain(box);
+    return {
+      x: t.tx + ((box.w - HD.w * c) / 2) * t.scale,
+      y: t.ty + ((box.h - HD.h * c) / 2) * t.scale,
+      w: HD.w * c * t.scale,
+      h: HD.h * c * t.scale,
+    };
+  };
+  // 領域を埋めきっているか (端に黒い帯を残していないか)
+  const covers = (box: Box, t: Transform): boolean => {
+    const d = drawn(box, t);
+    return d.x <= 0.01 && d.y <= 0.01 && d.x + d.w >= box.w - 0.01 && d.y + d.h >= box.h - 0.01;
+  };
+
+  // キーボードを開いて埋めた状態が出発点
+  const open = refit(KBD, HD, true, { x: 0.5, y: 0.5 });
+  const mag = magOf(KBD, open);
+
+  it("トレイの高さが変わっても映像の大きさは変わらない", () => {
+    const t = keepView(KBD, OS, HD, open, mag);
+    expect(magOf(OS, t)).toBeCloseTo(mag, 6);
+    expect(drawn(OS, t).h).toBeCloseTo(drawn(KBD, open).h, 6);
+  });
+
+  it("上端に揃えて置き直す (見えていたものが1pxも動かない)", () => {
+    const t = keepView(KBD, OS, HD, open, mag);
+    expect(drawn(OS, t).x).toBeCloseTo(drawn(KBD, open).x, 6);
+    expect(drawn(OS, t).y).toBeCloseTo(drawn(KBD, open).y, 6);
+  });
+
+  // キーボード → OSキーボード → キーボード と戻ってきたら、元の見え方に戻ること。
+  // 片道ずつ辻褄が合っていても、往復で戻らなければ行き来のたびにずれていく。
+  it("行き来しても元の見え方に戻る", () => {
+    const there = keepView(KBD, OS, HD, open, mag);
+    const back = keepView(OS, KBD, HD, there, mag);
+    expect(back.scale).toBeCloseTo(open.scale, 6);
+    expect(back.tx).toBeCloseTo(open.tx, 6);
+    expect(back.ty).toBeCloseTo(open.ty, 6);
+  });
+
+  it("どの高さでも領域を埋めきる (黒い帯を残さない)", () => {
+    for (const box of [OS, KBD, { w: 390, h: 300 }, { w: 390, h: 700 }]) {
+      const t = keepView(KBD, box, HD, open, mag);
+      expect(covers(box, t), `${box.h}px`).toBe(true);
+    }
+  });
+
+  // 埋めるために一時的に拡大したぶんは覚えない。覚えると、OSキーボードが
+  // 上がりきって領域が狭くなったあとも拡大したままになる。
+  it("埋めるのに足りない大きさなら、そのぶんだけ拡大する", () => {
+    const tall = { w: 390, h: 795 }; // 入力欄だけ出てキーボードはまだ来ていない状態
+    const t = keepView(KBD, tall, HD, open, mag);
+    expect(magOf(tall, t)).toBeGreaterThan(mag);
+    // 覚えている大きさ(mag)は変わらないので、狭くなれば元の大きさに戻る
+    expect(magOf(OS, keepView(tall, OS, HD, t, mag))).toBeCloseTo(mag, 6);
+  });
+
+  it("上限を超えて拡大しない", () => {
+    expect(keepView(KBD, { w: 390, h: 900 }, HD, open, mag).scale).toBe(4);
+  });
+
+  // 映像がまだ届いていない・保つべき大きさが無いなど、基準が取れないとき。
+  // ここで0除算の結果を書き込むと映像が消えるので、収め直しに落とす。
+  it("基準が取れないときは収め直す", () => {
+    expect(keepView(KBD, OS, HD, open, 0)).toEqual(refit(OS, HD, true));
+    expect(keepView(KBD, OS, { w: 0, h: 0 }, open, mag)).toEqual({ scale: 1, tx: 0, ty: 0 });
   });
 });
 

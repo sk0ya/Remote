@@ -729,6 +729,83 @@ async function run(page, name, width, height) {
     JSON.stringify(tapped)
   );
 
+  // 5. 下端のパネルを行き来しても映像が動かないこと。
+  //
+  //    ここまでの検証は、いったん全部閉じてから次を開いていた。実際に押される
+  //    ボタンは「今出ているものを閉じて、次を開く」で、閉じた通知と開いた通知は
+  //    別々に届く。0が先に届いたぶんをそのまま反映すると、一瞬だけ下端に何も
+  //    無い状態になり、映像は全体表示へ戻ってから埋め直される — 見た目には
+  //    出ない一瞬でも、そのあいだに拡大も位置も作り直されるので、切り替えるたびに
+  //    映像が動いていた。閉じてから開く経路そのものを通して測る。
+  //
+  //    OSキーボードだけはトレイの高さが違う (下にキーボードが控えているので
+  //    入力欄1行ぶんしか置けない)。領域が変わっても、映像の大きさと位置は
+  //    変えずに切り取る量だけを変えること。
+  const osHidden = Math.round(height * 0.35);
+  const openOs = async () => {
+    await page.evaluate("window.test.openText()"); // 入力欄が先に出て、
+    await new Promise((r) => setTimeout(r, 60));
+    await page.evaluate(`window.test.setVisibleHeight(${height - osHidden})`); // 少し遅れて上がる
+    await new Promise((r) => setTimeout(r, 120));
+  };
+  const closeOs = async (open) => {
+    await page.evaluate(`window.test.${open}()`); // 実物のボタンと同じく先に入力欄を閉じ、
+    await new Promise((r) => setTimeout(r, 60));
+    await page.evaluate(`window.test.setVisibleHeight(${height})`); // キーボードは少し遅れて下がる
+    await new Promise((r) => setTimeout(r, 120));
+  };
+  const settle = () => new Promise((r) => setTimeout(r, 120));
+
+  await page.evaluate("window.test.toggleKeyboard()");
+  await settle();
+  // 開いた直後の位置のままだと、置き直されても同じ絵になってしまって差が出ない。
+  // 実際に使うときと同じく、少しつまんで見たいところを出してから測る。
+  await page.evaluate(`window.test.pinch(${width / 2}, ${height / 3}, 200, 260)`);
+  await settle();
+  const first = await page.evaluate("JSON.stringify(window.test.measure())").then(JSON.parse);
+  ok(
+    first.content.h > open.content.h + 1,
+    `${name}: つまんでも拡大できていない`,
+    `${first.content.h.toFixed(0)}px / ${open.content.h.toFixed(0)}px`
+  );
+  const steps = [];
+  const step = async (label, act) => {
+    await act();
+    steps.push([label, await page.evaluate("JSON.stringify(window.test.measure())").then(JSON.parse)]);
+  };
+  await step("マウスパネルへ", async () => {
+    await page.evaluate("window.test.toggleMouse()");
+    await settle();
+  });
+  await step("キーボードへ戻す", async () => {
+    await page.evaluate("window.test.toggleKeyboard()");
+    await settle();
+  });
+  await step("OSキーボードへ", openOs);
+  await step("OSキーボードからマウスパネルへ", () => closeOs("toggleMouse"));
+  await step("キーボードへ戻す", async () => {
+    await page.evaluate("window.test.toggleKeyboard()");
+    await settle();
+  });
+  for (const [label, m] of steps) {
+    near(m.content.w, first.content.w, 1, `${name}: ${label} で映像の大きさが変わる`);
+    near(m.content.h, first.content.h, 1, `${name}: ${label} で映像の大きさが変わる`);
+    near(m.content.x, first.content.x, 1, `${name}: ${label} で映像が横に動く`);
+    near(m.content.y, first.content.y, 1, `${name}: ${label} で映像が縦に動く`);
+    // 動かさないために黒い帯を出していないこと (埋めるのは元からの約束)
+    ok(covers(m), `${name}: ${label} で映像の端に黒い帯が残る`, coverage(m));
+  }
+  // OSキーボードのときだけは領域そのものが狭い。同じ映像のまま、下を切り取る量が
+  // 増えるだけ、という形になっていること (映像が動かないのが領域が同じだから、では困る)
+  const onOs = steps[2][1];
+  ok(
+    onOs.box.h < first.box.h - 10,
+    `${name}: OSキーボードで映像の領域が狭くなっていない`,
+    `${onOs.box.h.toFixed(0)}px / ${first.box.h.toFixed(0)}px`
+  );
+  await page.evaluate("window.test.toggleKeyboard()"); // 後片付け
+  await settle();
+
   return { closed, open, mouse };
 }
 

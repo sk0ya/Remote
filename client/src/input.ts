@@ -239,16 +239,71 @@ export function refit(box: Box, content: Box, fill: boolean, focus?: Pt): Transf
   const scale = Math.min(MAX_SCALE, Math.max(1, cover / contain));
   // はみ出したぶんはフォーカス位置を見せる。フォーカス位置が無いときは
   // 中央を見せる (端に寄せると必ず片側が切れて見えない)。
-  const baseW = content.w * contain;
-  const baseH = content.h * contain;
-  const spanX: Span = { off: (box.w - baseW) / 2, len: baseW };
-  const spanY: Span = { off: (box.h - baseH) / 2, len: baseH };
-  const focusX = focus ? spanX.off + focus.x * baseW : box.w / 2;
-  const focusY = focus ? spanY.off + focus.y * baseH : box.h / 2;
+  const span = spansOf(box, content, contain);
+  const focusX = focus ? span.x.off + focus.x * span.x.len : box.w / 2;
+  const focusY = focus ? span.y.off + focus.y * span.y.len : box.h / 2;
   return {
     scale,
-    tx: clampPan(box.w / 2 - focusX * scale, box.w, scale, spanX),
-    ty: clampPan(box.h / 2 - focusY * scale, box.h, scale, spanY),
+    tx: clampPan(box.w / 2 - focusX * scale, box.w, scale, span.x),
+    ty: clampPan(box.h / 2 - focusY * scale, box.h, scale, span.y),
+  };
+}
+
+// 埋めた表示のまま、表示領域だけが変わったときの置き直し。
+//
+// 下端のトレイの高さは中身で変わる — OSキーボードを使うときは、その上に出せるのが
+// 入力欄1行ぶんだけになる (キーボード5段ぶんも足すと映像に残る高さが無くなる)。
+// 領域が変わるたびに refit で置き直すと、倍率も見ている場所も作り直される。
+// 切り替えるたびに映像が伸び縮みして飛ぶので、同じ場所を見ているつもりでも
+// 見え方ごと変わってしまう。
+//
+// 保つのは2つ:
+//   - 映像の実寸 (mag = 映像1pxを画面何pxで描くか)。トレイが高くなったぶんは、
+//     縮めるのではなく下を切り取って隠す。
+//   - 映像の位置。領域が伸び縮みするのは下端(トレイ側)だけなので、上端に
+//     揃えて置き直せば、見えていたものは1pxも動かない。中央に揃えると、
+//     高さの変わったぶんの半分だけ画面全体がずり上がる。
+//
+// mag は「そう見せたい大きさ」で、いま描いている大きさとは別に持つ。開閉の途中
+// (OSキーボードがせり上がってくるあいだ) は領域の形が刻々と変わり、埋めるために
+// 一時的に拡大が要ることがある。そのぶんを覚え込むと、キーボードが出きった後も
+// 拡大したままになる。覚えるのは指でつまんだときだけにして、途中経過は残さない。
+export function keepView(
+  prev: Box,
+  next: Box,
+  content: Box,
+  t: Transform,
+  mag: number
+): Transform {
+  const before = fitScale(prev, content);
+  const after = fitScale(next, content);
+  if (!(before > 0) || !(after > 0) || !(t.scale > 0) || !(mag > 0)) {
+    return refit(next, content, true);
+  }
+  // 領域の左上に見えているものが、映像のどこなのか (正規化座標)
+  const at = (off: number, span: Span): number =>
+    span.len > 0 ? clamp01((-off / t.scale - span.off) / span.len) : 0;
+  const was = spansOf(prev, content, before);
+  const corner = { x: at(t.tx, was.x), y: at(t.ty, was.y) };
+  // 実寸を保つ倍率。ただし埋めきれなくなるところまでは下げない (黒い帯が出る)。
+  const cover = Math.max(next.w / content.w, next.h / content.h);
+  const scale = Math.min(MAX_SCALE, Math.max(1, cover / after, mag / after));
+  const now = spansOf(next, content, after);
+  // 同じものが同じ場所 (左上) に来るように置く。はみ出す向きは clampPan が戻す。
+  return {
+    scale,
+    tx: clampPan(-(now.x.off + corner.x * now.x.len) * scale, next.w, scale, now.x),
+    ty: clampPan(-(now.y.off + corner.y * now.y.len) * scale, next.h, scale, now.y),
+  };
+}
+
+// 変換前(レイアウト上)の、映像そのものの位置と大きさ (contain の余白は除く)。
+function spansOf(box: Box, content: Box, contain: number): { x: Span; y: Span } {
+  const w = content.w * contain;
+  const h = content.h * contain;
+  return {
+    x: { off: (box.w - w) / 2, len: w },
+    y: { off: (box.h - h) / 2, len: h },
   };
 }
 
@@ -292,6 +347,9 @@ export class InputController {
   private box: Box;
   // ソフトキーボードで領域が削られている (埋めて表示している) かどうか
   private filling = false;
+  // 見せたい映像の実寸 (映像1pxを画面何pxで描くか)。表示領域が変わっても
+  // これを保てば映像は伸び縮みしない。0 = まだ決まっていない。
+  private mag = 0;
 
   private outbox: Outbox;
 
@@ -421,12 +479,7 @@ export class InputController {
     const content = { w: this.video.videoWidth, h: this.video.videoHeight };
     const contain = fitScale(this.box, content);
     if (!(contain > 0)) return null;
-    const w = content.w * contain;
-    const h = content.h * contain;
-    return {
-      x: { off: (this.box.w - w) / 2, len: w },
-      y: { off: (this.box.h - h) / 2, len: h },
-    };
+    return spansOf(this.box, content, contain);
   }
 
   // キーボード表示時に見せる位置を、クリックの完了を待たずに記録する。
@@ -459,19 +512,43 @@ export class InputController {
   // ここで置き直すのは領域が変わったときだけ。ユーザーがつまんで動かした
   // 拡大・位置は、次に領域が変わるまでそのまま残る。キーボードとマウスパネルは
   // 同じ高さのトレイに入っていて fill も同じなので、行き来しても何も動かない。
-  relayout(fill: boolean): void {
+  //
+  // 埋めたまま高さだけが変わるとき (Webキーボード ⇄ OSキーボード) は、
+  // 見えているものを保って置き直す。倍率も見ている場所も作り直すと、
+  // 切り替えるたびに映像が伸び縮みして飛ぶ。
+  //
+  // settling = OSキーボードが上がりきる / 下がりきる前 (screen.ts)。今の領域は
+  // 途中の姿で、画面の3分の1ほどがこれから削られる・返ってくる。ここで置き直すと、
+  // いったん途中の領域に合わせて拡大してから、落ち着いた時点でもう一度置き直す
+  // ことになる。切り替えのたびに映像が一瞬伸びて戻るので、落ち着くまで触らない。
+  relayout(fill: boolean, settling = false): void {
+    if (settling) return;
     const next = this.videoBox();
     if (next.w === this.box.w && next.h === this.box.h && fill === this.filling) return;
+    const prev = this.box;
+    const wasFilling = this.filling;
     this.box = next;
     this.filling = fill;
     const content = { w: this.video.videoWidth, h: this.video.videoHeight };
-    // 見せるのは「今カーソルが居るところ」。まだ動かしていなければ直前に
-    // 触れたところを使う (resyncPoint と同じ順序で選ぶ)。
-    const r = refit(next, content, fill, resyncPoint(this.cursor, this.focus));
+    const keeping = fill && wasFilling;
+    const r = keeping
+      ? keepView(prev, next, content, { scale: this.scale, tx: this.tx, ty: this.ty }, this.mag)
+      : // 埋め始めるときに見せるのは「今カーソルが居るところ」。まだ動かして
+        // いなければ直前に触れたところを使う (resyncPoint と同じ順序で選ぶ)。
+        refit(next, content, fill, resyncPoint(this.cursor, this.focus));
     this.scale = r.scale;
     this.tx = r.tx;
     this.ty = r.ty;
+    // 埋め始め・全体表示へ戻したときが、実寸の基準の決まり直る唯一の場面。
+    // 保っている最中は書き戻さない (埋めるための一時的な拡大まで覚えてしまう)。
+    if (!keeping) this.mag = this.drawnMag();
     this.applyTransform();
+  }
+
+  // いま映像1pxを画面何pxで描いているか。
+  private drawnMag(): number {
+    const content = { w: this.video.videoWidth, h: this.video.videoHeight };
+    return this.scale * fitScale(this.box, content);
   }
 
   private onDown = (e: PointerEvent): void => {
@@ -577,6 +654,9 @@ export class InputController {
         const img = this.imageSpans();
         this.tx = clampPan(this.tx, this.box.w, this.scale, img?.x);
         this.ty = clampPan(this.ty, this.box.h, this.scale, img?.y);
+        // つまんで決めた大きさが、以後の「見せたい実寸」になる。
+        // 表示領域が変わっても、これを保ったまま切り取る量だけを変える。
+        this.mag = this.drawnMag();
         this.applyTransform();
         this.twoFingerStart = { mid, dist, time: this.twoFingerStart.time };
       } else {

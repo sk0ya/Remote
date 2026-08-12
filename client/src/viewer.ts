@@ -142,7 +142,9 @@ export function renderViewer(app: HTMLElement, hostId: string): void {
 
   // ソフトキーボードで見えている範囲へビューアを収める配線 (screen.ts)。
   // はみ出した映像は2本指で動かして覗ける (input.ts の refit)。
-  const screen = attachScreenLayout(vroot, (occluded) => controller?.relayout(occluded));
+  const screen = attachScreenLayout(vroot, (occluded, settling) =>
+    controller?.relayout(occluded, settling)
+  );
   // 特殊キーバーの高さぶん、映像の表示領域を上に詰める。
   // バーは折り返しで高さが変わるので、実測した値を渡してもらう。
   const onKbdLayout = (height: number) => screen.setWebKeyboardHeight(height);

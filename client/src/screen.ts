@@ -12,6 +12,9 @@
 // 縦の位置(top)にも触らない。iOSは入力欄を見せようとして自前でもページを
 // ずらすので、こちらでも足すと画面の外へ送り出してしまう。
 
+// 高さの通知(set*Height)は、すぐには反映しない。パネルの入れ替えでは
+// 「閉じた」と「開いた」が別々に届くので、出揃うまで待ってから1回で反映する
+// (下の scheduleApply)。
 export interface ScreenLayout {
   // 表示領域を測り直して反映する
   apply(): void;
@@ -49,10 +52,26 @@ export function shouldFill(h: Occlusion): boolean {
   return h.occluded + Math.max(h.webKeyboard, h.textInput, h.mousePad) > 0;
 }
 
+// 表示領域がまだ途中の姿かどうか。
+//
+// OSキーボードは、入力欄にフォーカスしてから上がりきるまで、また入力欄を
+// 閉じてから下がりきるまでに、それぞれ間がある。そのあいだに見えている領域は
+// 本物ではない — 画面の3分の1ほどが、これから削られる/これから返ってくる。
+// 見分け方は「入力欄とOSキーボードの食い違い」。OSキーボードを出す先はこの
+// 入力欄しかないので、片方だけ在る状態は必ず動いている途中を指す。
+//
+// 途中で置き直すと、そのたびに映像は一瞬だけ別の領域に合わせて拡大され、
+// 落ち着いた時点でもう一度置き直される。切り替えのたびに伸びて戻る、が
+// 見えるのはこれで、上限まで拡大した状態を通ると位置まで巻き添えになる。
+export function settling(h: Occlusion): boolean {
+  return h.textInput > 0 !== h.occluded > 0; // 片方だけ在る = 動いている途中
+}
+
 export function attachScreenLayout(
   viewer: HTMLElement,
-  // 領域が削られているか (削られているあいだ、映像は余白を作らず埋める)
-  onChanged: (occluded: boolean) => void,
+  // 領域が削られているか (削られているあいだ、映像は余白を作らず埋める)。
+  // settling = OSキーボードの上がりきる前。まだ映像を置き直さない合図。
+  onChanged: (occluded: boolean, settling: boolean) => void,
   vv: VisualViewport | null = window.visualViewport
 ): ScreenLayout {
   let webKeyboardHeight = 0;
@@ -90,38 +109,58 @@ export function attachScreenLayout(
     const raise = occluded + accessory;
     viewer.style.bottom = raise > 0 ? `${raise}px` : "";
     viewer.classList.toggle("keyboard-open", accessory > 0);
-    onChanged(
-      shouldFill({
-        occluded,
-        webKeyboard: webKeyboardHeight,
-        textInput: textInputHeight,
-        mousePad: mousePadHeight,
-      })
-    );
+    const h: Occlusion = {
+      occluded,
+      webKeyboard: webKeyboardHeight,
+      textInput: textInputHeight,
+      mousePad: mousePadHeight,
+    };
+    onChanged(shouldFill(h), settling(h));
   };
 
-  // キーボードの開閉中は何度も飛んでくるが、遅らせると表示が遅れて追従するので
-  // その都度すぐ反映する(ホストへの送信は伴わないので回数は問題にならない)。
-  vv?.addEventListener("resize", apply);
-  vv?.addEventListener("scroll", apply);
+  // 下端のパネルの入れ替えは、必ず「閉じた(高さ0)」と「開いた(高さH)」の
+  // 2つの通知に分かれて届く。片方はResizeObserver、片方はその場で呼ばれるので、
+  // 順序は揃えられない。0が先に来たぶんをそのまま反映すると、一瞬だけ
+  // 「下端に何も無い」状態になり、映像は全体表示へ戻ってから埋め直される。
+  // 見た目には出ない一瞬でも、そのあいだに拡大も位置も作り直されるので、
+  // パネルを切り替えるたびに映像が動く。最大を採るだけでは足りない
+  // (0が後から来る側は防げるが、先に来る側は防げない)。
+  //
+  // 高さの通知はいったん受け止め、同じ切れ目で届いたぶんが出揃ってから
+  // 1回だけ反映する。押した瞬間の描画には間に合うので、遅れは見えない。
+  let pending = 0;
+  const scheduleApply = (): void => {
+    if (pending) return;
+    pending = window.setTimeout(() => {
+      pending = 0;
+      apply();
+    }, 0);
+  };
+
+  // OSキーボードの開閉中は何度も飛んでくる。まとめても1つ後の処理まで待つだけ
+  // なので追従は遅れないし、パネルの高さの通知と同じ切れ目で反映されるようになる
+  // (OSキーボードが下がるのとパネルが入れ替わるのは同時に起きる)。
+  vv?.addEventListener("resize", scheduleApply);
+  vv?.addEventListener("scroll", scheduleApply);
 
   return {
     apply,
     setWebKeyboardHeight(height: number): void {
       webKeyboardHeight = height > 0 ? height : 0;
-      apply();
+      scheduleApply();
     },
     setTextInputHeight(height: number): void {
       textInputHeight = height > 0 ? height : 0;
-      apply();
+      scheduleApply();
     },
     setMousePadHeight(height: number): void {
       mousePadHeight = height > 0 ? height : 0;
-      apply();
+      scheduleApply();
     },
     dispose(): void {
-      vv?.removeEventListener("resize", apply);
-      vv?.removeEventListener("scroll", apply);
+      clearTimeout(pending);
+      vv?.removeEventListener("resize", scheduleApply);
+      vv?.removeEventListener("scroll", scheduleApply);
       viewer.style.bottom = "";
       viewer.classList.remove("keyboard-open");
       document.documentElement.style.removeProperty("--viewport-occlusion-bottom");

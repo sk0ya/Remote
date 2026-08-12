@@ -59,7 +59,7 @@ const controller = new InputController(video, surface, dc);
 const vv = new FakeViewport();
 const screen = attachScreenLayout(
   vroot,
-  (occluded) => controller.relayout(occluded),
+  (occluded, settling) => controller.relayout(occluded, settling),
   vv as unknown as VisualViewport
 );
 const sent: object[] = [];
@@ -89,7 +89,10 @@ const text = new TextInput(
   textField,
   textClose,
   (m) => sent.push(m),
-  () => kbd.close(),
+  () => {
+    kbd.close();
+    mouse.close();
+  },
   (h) => screen.setTextInputHeight(h)
 );
 textToggle.style.display = "";
@@ -168,11 +171,15 @@ Object.assign(window, {
       vv.height = h;
       vv.dispatchEvent(new Event("resize"));
     },
+    // 下端のパネルは一度に1つだけ。実物のボタンと同じ順で開け閉めする
+    // (先に他を閉じてから開く — この順序そのものが切り替えの検証対象)。
     toggleKeyboard() {
+      text.close();
       mouse.close();
       kbd.toggle();
     },
     toggleMouse() {
+      text.close();
       kbd.close();
       mouse.toggle();
     },
