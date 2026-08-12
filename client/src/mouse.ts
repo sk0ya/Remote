@@ -112,6 +112,7 @@ export class MousePad {
   private build(withMic: boolean): HTMLElement {
     const body = document.createElement("div");
     body.className = "mousepad-body";
+    if (withMic) body.classList.add("has-mic");
 
     // 左の列は上から 🎤 / なぞる面。トレイの高さはキーボードに合わせてあるので、
     // なぞる面の上には余白が残る。押しっぱなしで喋るキーはそこへ置く —

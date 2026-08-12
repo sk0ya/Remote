@@ -21,6 +21,7 @@
   --tray-bg: rgba(17, 19, 24, 0.94);
   /* マウスパネルの「押す物・なぞる面」の高さ (トレイの高さとは別に決める) */
   --mousepad-h: 116px;
+  --mouse-mic-h: 56px;
   --tray-h: calc(
     var(--tray-rows) * var(--key-h) + (var(--tray-rows) - 1) * var(--key-gap) +
       var(--tray-ops-gap) + 2 * var(--tray-pad-y) + env(safe-area-inset-bottom, 0px)
@@ -432,15 +433,26 @@ input.field {
    キーボードと同じトレイ(.kbd)に載せる。背景も左右の端もそちらに従い、
    ここで持つのはキー1つ1つの見た目だけ。 */
 
-/* トレイはキーボードに合わせて高いので、中身の上には余白が残る。
-   ここを埋めてキーを大きくはしない — 押す物が下に集まっていた方が親指で
-   届くし、キーボードから切り替えても指の行き先が変わらない。
-   余白は余白のまま残す (🎤に渡すと1つだけ不釣り合いに大きくなる)。 */
+/* 操作面とボタンの大きさは抑え、内部の隙間だけを詰める。 */
+.mousepad {
+  /* 外側の固定トレイは残し、マウス専用の見た目の枠だけを中身に合わせる。 */
+  background: transparent;
+  box-shadow: none;
+}
+
 .mousepad-body {
-  flex: 1;
+  flex: none;
+  height: var(--mousepad-h);
   display: flex;
   align-items: flex-end;
-  gap: 10px;
+  gap: 6px;
+  background: var(--tray-bg);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06);
+  border-radius: 16px;
+}
+
+.mousepad-body.has-mic {
+  height: calc(var(--mousepad-h) + var(--mouse-mic-h) + 6px);
 }
 
 /* 左の列: 上に🎤、下になぞる面 */
@@ -450,7 +462,7 @@ input.field {
   display: flex;
   flex-direction: column;
   justify-content: flex-end;
-  gap: 10px;
+  gap: 6px;
   min-width: 0;
 }
 
@@ -462,7 +474,7 @@ input.field {
    釣り合いを崩すだけ。 */
 .mouse-mic {
   flex: none;
-  height: 56px;
+  height: var(--mouse-mic-h);
   font-size: 22px;
   touch-action: none;
   -webkit-touch-callout: none;
@@ -536,7 +548,7 @@ input.field {
   display: grid;
   grid-template-columns: 1.25fr 1fr;
   grid-auto-rows: 1fr;
-  gap: 10px;
+  gap: 6px;
   min-width: 0;
 }
 
@@ -619,6 +631,7 @@ input.field {
     /* 操作段2つが横に並ぶので、文字面3段+操作段1段の4段 */
     --tray-rows: 4;
     --mousepad-h: 84px;
+    --mouse-mic-h: 44px;
   }
 
   .kbd-ops {
@@ -628,16 +641,16 @@ input.field {
   /* 横持ちは縦の余裕が無い。幅は余っているので、詰めるのは高さだけでよい。 */
   .mousepad-body,
   .mouse-left {
-    gap: 8px;
+    gap: 6px;
   }
 
   .mouse-keys {
-    gap: 8px;
+    gap: 6px;
   }
 
   /* 縦に詰まるので🎤も一回り小さくする (指1本ぶんは残す)。 */
   .mouse-mic {
-    height: 44px;
+    height: var(--mouse-mic-h);
   }
 
   /* flex-grow は段の合計幅をJSから入れてある。段をまたいでキー幅が揃う。 */
