@@ -273,9 +273,9 @@ export function renderViewer(app: HTMLElement, hostId: string): void {
   };
 
   // 音声の処理結果など、一定時間で消える表示
-  const toast = (text: string, error = false) => {
+  const toast = (text: string, error = false, ms = 2500) => {
     setStatus(text, error);
-    toastTimer = window.setTimeout(() => setStatus(""), 2500);
+    toastTimer = window.setTimeout(() => setStatus(""), ms);
   };
 
   async function handleOffer(sdp: string, nonce: string, version: number): Promise<void> {
@@ -432,6 +432,10 @@ export function renderViewer(app: HTMLElement, hostId: string): void {
             // cmdが空 = コマンド未一致 → 発話がそのまま打ち込まれた
             if (m.err) toast(`🎤 ${m.err}`, true);
             else toast(m.cmd ? `⚡ ${m.cmd}` : `⌨ ${m.s ?? ""}`);
+          } else if (m.t === "notice") {
+            // PC側で操作が届かなかったときなど。原因が分からないまま
+            // 反応しない画面を触り続けることになるので、少し長めに出す。
+            if (m.s) toast(`⚠ ${m.s}`, true, 6000);
           }
         } catch {
           // JSON以外は無視

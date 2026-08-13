@@ -8,6 +8,7 @@ import (
 	"log"
 	"strings"
 	"sync"
+	"time"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -35,6 +36,8 @@ const (
 	mouseeventfVirtualdesk = 0x4000
 	mouseeventfAbsolute    = 0x8000
 
+	smCxScreen        = 0
+	smCyScreen        = 1
 	smXVirtualScreen  = 76
 	smYVirtualScreen  = 77
 	smCxVirtualScreen = 78
@@ -79,6 +82,44 @@ func sendMouse(mi mouseInput) {
 func sendKey(ki keybdInput) {
 	ki.typ = inputKeyboard
 	procSendInput.Call(1, uintptr(unsafe.Pointer(&ki)), unsafe.Sizeof(ki))
+}
+
+// スマホへ出す知らせの送り先と、間引きの間隔。
+// マウス移動は毎秒何十発も来るので、そのたびに出すと表示が埋まる。
+var (
+	noticeMu   sync.Mutex
+	noticeFn   func(string)
+	noticeAt   time.Time
+	noticeLast string
+)
+
+const noticeInterval = 5 * time.Second
+
+// OnNotice は操作が届かなかった理由などをスマホへ出す送り先を登録する。
+// 黙って効かなくなるのがいちばん困る — スマホからは、繋がっていないのか
+// 操作が捨てられているのか見分けられない。
+func OnNotice(f func(string)) {
+	noticeMu.Lock()
+	defer noticeMu.Unlock()
+	noticeFn = f
+}
+
+// notice は同じ知らせを続けざまに出さないよう間引いてから送る。
+// 内容が変わったときは状況が変わったということなので、待たずに出す。
+func notice(msg string) {
+	noticeMu.Lock()
+	if msg == noticeLast && time.Since(noticeAt) < noticeInterval {
+		noticeMu.Unlock()
+		return
+	}
+	noticeAt, noticeLast = time.Now(), msg
+	fn := noticeFn
+	noticeMu.Unlock()
+
+	log.Printf("input: %s", msg)
+	if fn != nil {
+		fn(msg)
+	}
 }
 
 // Msg はDataChannel経由の操作メッセージ。
@@ -143,6 +184,29 @@ func mapNorm(x, y float64) (dx, dy int32, flags uint32) {
 	return dx, dy, mouseeventfAbsolute | mouseeventfVirtualdesk
 }
 
+// screenPoint は正規化座標(0..1)を画面上のピクセル座標に直す。
+// mapNorm と同じマップ先を見るが、こちらはウィンドウを調べるための実座標を返す
+// (SendInput用の 0..65535 ではない)。
+func screenPoint(x, y float64) (int32, int32) {
+	targetMu.Lock()
+	defer targetMu.Unlock()
+	if !hasTarget {
+		return int32(x * metric(smCxScreen)), int32(y * metric(smCyScreen))
+	}
+	return int32(float64(tgX) + x*float64(tgW)), int32(float64(tgY) + y*float64(tgH))
+}
+
+// クライアントが最後に指した位置(正規化座標)。
+// 塞がれているあいだのカーソル移動は捨てられるが、どこを指したかは覚えておき、
+// 復帰した瞬間にそこへ飛ばす。そうしないと、塞がれる前の位置のまま押すことになる。
+// 触るのはDataChannelゴルーチンだけなので、ロックは要らない。
+var (
+	wantSet  bool
+	wantX    float64
+	wantY    float64
+	skipUpOf [3]bool // 押下を捨てたボタン。対応する解放も捨てる
+)
+
 // Handle は1メッセージを処理する。
 func Handle(data []byte) {
 	var m Msg
@@ -151,26 +215,23 @@ func Handle(data []byte) {
 	}
 	switch m.T {
 	case "mv":
-		dx, dy, flags := mapNorm(clamp01(m.X), clamp01(m.Y))
-		sendMouse(mouseInput{
-			dx:      dx,
-			dy:      dy,
-			dwFlags: mouseeventfMove | flags,
-		})
+		wantSet, wantX, wantY = true, clamp01(m.X), clamp01(m.Y)
+		moveTo(wantX, wantY)
+		noticeIfBlocked()
 	case "dn", "up":
-		var flag uint32
-		switch m.B {
-		case 0:
-			flag = mouseeventfLeftDown
-		case 1:
-			flag = mouseeventfMiddleDown
-		case 2:
-			flag = mouseeventfRightDown
-		default:
+		flag, ok := buttonFlag(m.B, m.T == "up")
+		if !ok {
 			return
 		}
-		if m.T == "up" {
-			flag <<= 1 // 各ボタンのUPフラグはDOWNの2倍値
+		if m.T == "dn" {
+			skipUpOf[m.B] = !prepareClick()
+			if skipUpOf[m.B] {
+				return
+			}
+		} else if skipUpOf[m.B] {
+			// 押していないボタンを離すと、掴んだ覚えのないドラッグが終わってしまう
+			skipUpOf[m.B] = false
+			return
 		}
 		sendMouse(mouseInput{dwFlags: flag})
 	case "wh":
@@ -180,12 +241,86 @@ func Handle(data []byte) {
 		if m.DX != 0 {
 			sendMouse(mouseInput{dwFlags: mouseeventfHWheel, mouseData: int32(m.DX * 120)})
 		}
+		noticeIfBlocked()
 	case "key":
 		if !Key(m.Code, m.Down) {
 			log.Printf("input: 未対応キー: %s", m.Code)
 		}
+		noticeIfBlocked()
 	case "txt":
 		Text(m.S)
+		noticeIfBlocked()
+	}
+}
+
+// moveTo は正規化座標へカーソルを動かす。
+func moveTo(x, y float64) {
+	dx, dy, flags := mapNorm(x, y)
+	sendMouse(mouseInput{dx: dx, dy: dy, dwFlags: mouseeventfMove | flags})
+}
+
+// buttonFlag はボタン番号(0=左 1=中 2=右)を押下/解放のフラグに直す。
+func buttonFlag(b int, up bool) (uint32, bool) {
+	var flag uint32
+	switch b {
+	case 0:
+		flag = mouseeventfLeftDown
+	case 1:
+		flag = mouseeventfMiddleDown
+	case 2:
+		flag = mouseeventfRightDown
+	default:
+		return 0, false
+	}
+	if up {
+		flag <<= 1 // 各ボタンのUPフラグはDOWNの2倍値
+	}
+	return flag, true
+}
+
+// prepareClick は、権限の高いウィンドウのせいで入力が捨てられているなら、
+// クリックが届くように前面から外す。押していい状態ならtrue。
+//
+// 押す先がその権限の高いウィンドウ自身のときはfalse。押せばまた前面に戻って
+// 塞がるだけなので、カーソルだけ取り戻して押下は捨てる。
+func prepareClick() bool {
+	if blockedBy() == 0 {
+		return true
+	}
+	// 塞がれているあいだカーソルは動いていないので、押す先は
+	// 「クライアントが最後に指した位置」で見る(実際のカーソル位置ではない)。
+	x, y := clickPoint()
+	onHigher := higherThanSelf(windowAt(x, y))
+
+	if !unblock() {
+		notice("管理者権限のウィンドウが前面のため、操作が届きません")
+		return false
+	}
+	if onHigher {
+		notice("管理者権限のウィンドウは操作できません(カーソルは戻しました)")
+		return false
+	}
+	// 捨てられていたあいだのカーソル移動をここで反映してから押す。
+	// 省くと、塞がる前の位置で押すことになる。
+	if wantSet {
+		moveTo(wantX, wantY)
+	}
+	log.Printf("input: 権限の高いウィンドウを前面から外し、操作を再開しました")
+	return true
+}
+
+// clickPoint はこれから押す画面上の位置(ピクセル)を返す。
+func clickPoint() (int32, int32) {
+	if wantSet {
+		return screenPoint(wantX, wantY)
+	}
+	return cursorPoint()
+}
+
+// noticeIfBlocked は入力が捨てられている状態なら、その理由をスマホへ出す。
+func noticeIfBlocked() {
+	if blockedBy() != 0 {
+		notice("管理者権限のウィンドウが前面です。別のウィンドウをタップすると操作に戻れます")
 	}
 }
 

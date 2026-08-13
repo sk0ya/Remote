@@ -169,6 +169,8 @@ func main() {
 	} else {
 		log.Printf("音声認識: 無効 (実行ファイルが見つかりません: %q)", cfg.STTCommand)
 	}
+	// 操作が届かなかった理由をスマホの表示に出す(管理者権限のウィンドウなど)
+	input.OnNotice(a.sendNotice)
 
 	ui.RunTray(pm, ui.TrayCallbacks{PairPageURL: pairURL, OnQuit: cancel},
 		func(setStatus func(string)) {
@@ -714,6 +716,18 @@ func (a *app) sendTicket(sess *session.Session) {
 	}
 	if err := sess.Send(map[string]any{"t": "ticket", "v": a.pm.IssueTicket()}); err != nil {
 		log.Printf("session: チケット送信失敗: %v", err)
+	}
+}
+
+// sendNotice はホスト側で起きたことをスマホの表示に出す。
+// 接続していなければ出す先が無いので黙って捨てる。
+func (a *app) sendNotice(s string) {
+	sess := a.session()
+	if sess == nil {
+		return
+	}
+	if err := sess.Send(map[string]any{"t": "notice", "s": s}); err != nil {
+		log.Printf("session: 通知送信失敗: %v", err)
 	}
 }
 
