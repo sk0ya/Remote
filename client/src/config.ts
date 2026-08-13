@@ -7,6 +7,7 @@
 
 const KEY = "remote.hostId";
 const CRED_KEY = "remote.credId";
+const TICKET_KEY = "remote.ticket";
 
 // シグナリングサーバーのURL。
 // 本番は VITE_SIGNAL_URL(Cloudflare WorkerのURL)、開発時は同一ホストの8787へ。
@@ -59,5 +60,36 @@ export function saveCredId(credId: string): void {
     localStorage.setItem(CRED_KEY, credId);
   } catch {
     /* 指定できないだけで、選択式にフォールバックする */
+  }
+}
+
+// 再接続チケット。ホストが接続ごとにDataChannel(認証済みのDTLS経路)で配る、
+// 生体認証を省くための短命な秘密で、ホスト側のTTLは10分。
+//
+// ここだけ sessionStorage を使う。localStorage に置くと端末に残り続け、
+// パスキーで守っている意味が薄れる。sessionStorage はタブを閉じれば消える点が
+// メモリと同じで、違うのは再読み込みを生き延びることだけ。
+// 読み込み直すたびに生体認証をやり直させないために、この差だけを取る。
+export function loadTicket(): string | null {
+  try {
+    return sessionStorage.getItem(TICKET_KEY) || null;
+  } catch {
+    return null;
+  }
+}
+
+export function saveTicket(ticket: string): void {
+  try {
+    sessionStorage.setItem(TICKET_KEY, ticket);
+  } catch {
+    // 書けなければ毎回パスキーで認証するだけ。接続はできる
+  }
+}
+
+export function clearTicket(): void {
+  try {
+    sessionStorage.removeItem(TICKET_KEY);
+  } catch {
+    /* 失効したチケットは送っても弾かれるだけで実害はない */
   }
 }

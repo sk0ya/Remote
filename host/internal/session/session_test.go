@@ -1,6 +1,7 @@
 package session
 
 import (
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -162,6 +163,38 @@ func TestSummarizeCandidatesSeparatesIPFamilies(t *testing.T) {
 	}
 }
 
+// trickleでは候補が1つずつ "candidate:..." の形で届く。SDPから数えたときと
+// 同じ集計にならないと、失敗時の診断が「候補を受信できませんでした」に化ける。
+func TestAddLineCountsTrickleCandidatesLikeSDP(t *testing.T) {
+	lines := []string{
+		"candidate:1 1 udp 1 192.168.0.2 5000 typ host",
+		"candidate:4 1 udp 1 203.0.113.8 5003 typ srflx raddr 192.168.0.2 rport 5000",
+	}
+	var trickled candidateSummary
+	for _, line := range lines {
+		trickled.addLine(line)
+	}
+	fromSDP := summarizeCandidates("a=" + lines[0] + "\r\n" + "a=" + lines[1] + "\r\n")
+
+	if trickled.total != fromSDP.total || trickled.count("host", "v4") != fromSDP.count("host", "v4") ||
+		trickled.count("srflx", "v4") != fromSDP.count("srflx", "v4") {
+		t.Fatalf("trickle集計 %#v がSDP集計 %#v と一致しない", trickled.counts, fromSDP.counts)
+	}
+	if !trickled.publicV4 {
+		t.Errorf("srflx候補があるのに到達可能なIPv4と見なされていない")
+	}
+}
+
+func TestAddLineIgnoresNonCandidateLines(t *testing.T) {
+	var s candidateSummary
+	for _, line := range []string{"", "a=ice-ufrag:abcd", "v=0", "a=candidate:壊れている"} {
+		s.addLine(line)
+	}
+	if s.total != 0 {
+		t.Fatalf("候補でない行を数えている: %#v", s.counts)
+	}
+}
+
 func TestDiagnoseICEFailure(t *testing.T) {
 	from := func(sdp string) candidateSummary { return summarizeCandidates(sdp) }
 	v4 := "a=candidate:1 1 udp 1 203.0.113.8 5000 typ srflx\r\n"
@@ -174,6 +207,141 @@ func TestDiagnoseICEFailure(t *testing.T) {
 	}
 	if got := diagnoseICEFailure(from(v4), from(v4)); !strings.Contains(got, "NAT/ファイアウォール") {
 		t.Errorf("同一IP方式での疎通失敗診断 = %q", got)
+	}
+}
+
+func TestCandidateGateHoldsUntilOpened(t *testing.T) {
+	var g candidateGate
+	var got []string
+	g.add(webrtc.ICECandidateInit{Candidate: "first"})
+	g.add(webrtc.ICECandidateInit{Candidate: "second"})
+
+	g.open(func(c webrtc.ICECandidateInit) { got = append(got, c.Candidate) })
+	if want := []string{"first", "second"}; !slices.Equal(got, want) {
+		t.Fatalf("溜めた候補の送出 = %v, want %v", got, want)
+	}
+
+	g.add(webrtc.ICECandidateInit{Candidate: "third"})
+	if want := []string{"first", "second", "third"}; !slices.Equal(got, want) {
+		t.Fatalf("開いた後の候補 = %v, want %v", got, want)
+	}
+}
+
+// 同じ候補を二度送ると、相手側で重複した経路の疎通確認が走る。
+func TestCandidateGateOpensOnlyOnce(t *testing.T) {
+	var g candidateGate
+	count := 0
+	g.add(webrtc.ICECandidateInit{Candidate: "once"})
+	g.open(func(webrtc.ICECandidateInit) { count++ })
+	g.open(func(webrtc.ICECandidateInit) { count++ })
+	if count != 1 {
+		t.Fatalf("送出回数 = %d, want 1", count)
+	}
+}
+
+func TestCandidateGateIsSafeUnderConcurrentAdds(t *testing.T) {
+	var g candidateGate
+	var mu sync.Mutex
+	got := 0
+	var wg sync.WaitGroup
+	for range 50 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			g.add(webrtc.ICECandidateInit{Candidate: "c"})
+		}()
+	}
+	g.open(func(webrtc.ICECandidateInit) {
+		mu.Lock()
+		got++
+		mu.Unlock()
+	})
+	wg.Wait()
+	mu.Lock()
+	defer mu.Unlock()
+	if got != 50 {
+		t.Fatalf("受け取った候補 = %d, want 50 (溜めた分と後から来た分の合計)", got)
+	}
+}
+
+// ICE収集の完了を待ってからofferを送っていた頃は、STUNの応答が遅い回線では
+// その数秒がまるごと「接続要求を出したのに何も起きない」時間になっていた。
+func TestNewReturnsOfferWithoutWaitingForGathering(t *testing.T) {
+	start := time.Now()
+	s, sdp, err := New(hostmedia.Options{})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer s.Close()
+
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Errorf("offerを返すまで %v かかった — ICE収集を待っている", elapsed)
+	}
+	if strings.Contains(sdp, "a=candidate:") {
+		t.Errorf("offerに候補が入っている — trickleで送るなら入らないはず:\n%s", sdp)
+	}
+	if !strings.Contains(sdp, "a=ice-ufrag:") {
+		t.Errorf("offerにICEの認証情報が無い:\n%s", sdp)
+	}
+}
+
+// 候補がofferに載らなくなっても繋がることを、実際に張って確かめる。
+// SendCandidates を呼び忘れる/呼ぶ順を間違えると、ここで繋がらなくなる。
+func TestTrickleICEEstablishesConnection(t *testing.T) {
+	if testing.Short() {
+		t.Skip("ICEの疎通確認に数秒かかる")
+	}
+	host, offer, err := New(hostmedia.Options{})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer host.Close()
+
+	client, err := webrtc.NewPeerConnection(webrtc.Configuration{})
+	if err != nil {
+		t.Fatalf("クライアント側PeerConnection: %v", err)
+	}
+	defer client.Close()
+
+	if err := client.SetRemoteDescription(webrtc.SessionDescription{
+		Type: webrtc.SDPTypeOffer, SDP: offer,
+	}); err != nil {
+		t.Fatalf("offer適用: %v", err)
+	}
+	answer, err := client.CreateAnswer(nil)
+	if err != nil {
+		t.Fatalf("CreateAnswer: %v", err)
+	}
+	// ホストのremote descriptionを先に決めておく。これが無いと、この後
+	// 流れてくるクライアントの候補が受け付けられない。
+	if err := host.HandleAnswer(answer.SDP); err != nil {
+		t.Fatalf("HandleAnswer: %v", err)
+	}
+	client.OnICECandidate(func(c *webrtc.ICECandidate) {
+		if c == nil {
+			return
+		}
+		init := c.ToJSON()
+		if err := host.AddICECandidate(init.Candidate, init.SDPMid, init.SDPMLineIndex, init.UsernameFragment); err != nil {
+			t.Errorf("クライアント候補の追加: %v", err)
+		}
+	})
+	if err := client.SetLocalDescription(answer); err != nil {
+		t.Fatalf("answer適用: %v", err)
+	}
+	// 本番と同じ順序 — offerを渡し終えてから候補を流し始める
+	host.SendCandidates(func(c webrtc.ICECandidateInit) {
+		if err := client.AddICECandidate(c); err != nil {
+			t.Errorf("ホスト候補の追加: %v", err)
+		}
+	})
+
+	deadline := time.Now().Add(15 * time.Second)
+	for host.pc.ConnectionState() != webrtc.PeerConnectionStateConnected {
+		if time.Now().After(deadline) {
+			t.Fatalf("P2Pが確立しなかった (状態 %s)", host.pc.ConnectionState())
+		}
+		time.Sleep(50 * time.Millisecond)
 	}
 }
 

@@ -5,18 +5,25 @@ import { InputController } from "./input";
 import { VirtualKeyboard } from "./keyboard";
 import { MousePad } from "./mouse";
 import { assertPasskey, ticketMAC, b64uDecode } from "./webauthn";
-import { loadCredId, saveCredId } from "./config";
+import { loadCredId, saveCredId, loadTicket, saveTicket, clearTicket } from "./config";
 import { VoiceInput, voiceSupported } from "./voice";
 import { TextInput } from "./text";
 import { currentViewport } from "./viewport";
 import { attachScreenLayout } from "./screen";
 import { PROTOCOL_VERSION } from "./protocol";
-import { IceCandidateRelay } from "./ice";
+import { CandidateGate } from "./ice";
+import { PeerProbe } from "./liveness";
 
 const ICE_SERVERS: RTCIceServer[] = [
   { urls: "stun:stun.cloudflare.com:3478" },
   { urls: "stun:stun.l.google.com:19302" },
 ];
+
+// 接続要求を出してからofferが返るまでの猶予。
+// ホストはtrickle ICEなので、収集の完了を待たずにofferを送ってくる。
+// 中継サーバーを1往復するだけの時間で足り、これを過ぎたら何かがおかしい。
+// 長く取ると、届かなかった要求のために黙って待つ時間がそのまま伸びる。
+const CONNECT_TIMEOUT_MS = 10_000;
 
 // レイアウトの検証(test/layout.mjs)からも同じものを組み立てるので外に出す。
 export const VIEWER_HTML = `
@@ -63,6 +70,7 @@ export function renderViewer(app: HTMLElement, hostId: string): void {
   let voice: VoiceInput | null = null;
   let text: TextInput | null = null;
   let controller: InputController | null = null;
+  let probe: PeerProbe | null = null;
   let exited = false;
   // スマホがバックグラウンドに回っている / 画面が消えている。
   // このあいだに動くものはすべて誰にも見えないまま電池を減らすだけなので、
@@ -84,8 +92,10 @@ export function renderViewer(app: HTMLElement, hostId: string): void {
   let signalRetries = 0;
   let signalTimer = 0;
   // ホストから受け取る再接続チケット。これがあるあいだは生体認証を省ける。
-  // メモリだけに置き、localStorageには書かない(タブを閉じれば消える)。
-  let ticket: string | null = null;
+  // タブを閉じれば消えるが、再読み込みは生き延びる (config.ts の sessionStorage)。
+  let ticket: string | null = loadTicket();
+  // ホストから届いたICE候補。offerのsetRemoteDescriptionが終わるまで溜める。
+  let remoteCandidates: CandidateGate | null = null;
   // 今のP2P経路が確立した後にだけ実行する認証処理。
   let authenticateCurrent: (() => Promise<void>) | null = null;
   let authenticating = false;
@@ -115,6 +125,8 @@ export function renderViewer(app: HTMLElement, hostId: string): void {
     text = null;
     mouse?.dispose();
     mouse = null;
+    probe?.stop();
+    probe = null;
     controller?.dispose();
     controller = null;
     pc?.close();
@@ -172,17 +184,26 @@ export function renderViewer(app: HTMLElement, hostId: string): void {
       // 見えないところで再接続を試しても、認証ダイアログが溜まるだけ
       clearTimeout(retryTimer);
       clearTimeout(signalTimer);
+      probe?.stop(); // 返事を待っている途中なら諦める。復帰時に聞き直す
       return;
     }
 
     controller?.send({ t: "vis", on: true });
     sendViewport();
-    // 隠れているあいだに切れていたら、ここで繋ぎ直す
+    // 隠れているあいだに切れていたら、ここで繋ぎ直す。
+    //
+    // 「切れている」の判定に状態を使えないのがこの場面の厄介なところで、
+    // 眠っているあいだに経路を落とされてもFINは飛んでこないため、
+    // WebSocketは OPEN、PeerConnectionは connected のまま残る。どちらも
+    // 実際に返事が来るかを確かめる (ch.setActive(true) が即pingを打ち、
+    // 応答が無ければ onClose 経由で張り直される)。
     if (!ch.open) {
       signalRetries = 0;
       ch.connect();
     } else if (pc?.connectionState !== "connected") {
       requestConnect();
+    } else {
+      probe?.start();
     }
   }
 
@@ -208,6 +229,19 @@ export function renderViewer(app: HTMLElement, hostId: string): void {
     retryTimer = window.setTimeout(() => {
       if (!exited) requestConnect();
     }, delayMs);
+  };
+
+  // P2P経路が死んでいると分かった。ブラウザが自分で気づくのを待つと数十秒
+  // かかるので、こちらから畳んで即座に張り直す。
+  // close() では connectionstatechange が飛ばないので、後始末はここで行う。
+  const dropPeer = () => {
+    if (exited || halted || hidden) return;
+    probe?.stop();
+    pc?.close();
+    pc = null;
+    endAttempt();
+    setStatus("接続が切れています — 再接続します...", true);
+    requestConnect();
   };
 
   const setStatus = (text: string, error = false) => {
@@ -252,18 +286,29 @@ export function renderViewer(app: HTMLElement, hostId: string): void {
     pc?.close();
     authenticateCurrent = null;
     authenticating = false;
-    pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
+    const peer = new RTCPeerConnection({ iceServers: ICE_SERVERS });
+    pc = peer;
     // answer送信前に集まった候補はいったん保持し、answer適用後は逐次送る。
     // 固定時間でICE収集を打ち切ると、モバイル回線でSTUNが遅い場合に
     // candidate 0件のanswerを送って接続不能になる。
-    const candidateRelay = new IceCandidateRelay((candidate) => {
+    const localCandidates = new CandidateGate((candidate) => {
       ch.send({ t: "candidate", v: PROTOCOL_VERSION, candidate });
     });
-    pc.onicecandidate = (ev) => {
+    peer.onicecandidate = (ev) => {
       if (!ev.candidate) return;
-      candidateRelay.add(ev.candidate.toJSON());
+      localCandidates.add(ev.candidate.toJSON());
     };
-    pc.ontrack = (ev) => {
+    // ホスト側の候補も同じくtrickleで届く。setRemoteDescription より先に
+    // 来ることがあるので、ゲートは await に入る前に差し替えておく
+    // (このあいだに届いた候補は溜まり、下の open() でまとめて適用される)。
+    remoteCandidates = new CandidateGate((candidate) => {
+      peer.addIceCandidate(candidate).catch((e) => {
+        // 古い接続要求の候補が遅れて届くとここに来る。捨てて構わない
+        console.warn("ICE候補を適用できません", e);
+      });
+    });
+    const hostCandidates = remoteCandidates;
+    peer.ontrack = (ev) => {
       video.srcObject = ev.streams[0] ?? new MediaStream([ev.track]);
       // 端末が自動再生を止めることがある。復帰の手段はステータス表示には
       // 載せない — ステータスは接続の進行で何度も書き換わるので、そのたびに
@@ -273,11 +318,16 @@ export function renderViewer(app: HTMLElement, hostId: string): void {
         .then(() => playgate.hide())
         .catch(() => playgate.show());
     };
-    pc.ondatachannel = (ev) => {
+    peer.ondatachannel = (ev) => {
       if (ev.channel.label !== "input") return;
       controller?.dispose(); // 再接続時に古い購読を残さない
       controller = new InputController(video, surface, ev.channel);
       const ctl = controller;
+      probe?.stop();
+      probe = new PeerProbe(
+        (msg) => ctl.send(msg),
+        () => dropPeer()
+      );
       keyboard?.dispose(); // 再接続で古いキーボードのDOMを残さない
       keyboard = new VirtualKeyboard(
         vroot,
@@ -356,6 +406,7 @@ export function renderViewer(app: HTMLElement, hostId: string): void {
       }
       // ホスト→クライアント通知 (ディスプレイ情報・音声の処理結果)
       ev.channel.onmessage = (me) => {
+        probe?.noteAlive(); // 中身によらず、届いた時点で経路は生きている
         try {
           const m = JSON.parse(String(me.data)) as {
             t: string;
@@ -369,6 +420,10 @@ export function renderViewer(app: HTMLElement, hostId: string): void {
           if (m.t === "ticket") {
             // 中継サーバーを通らないこの経路でしか渡されない
             ticket = m.v ?? null;
+            if (ticket) saveTicket(ticket);
+            else clearTicket();
+          } else if (m.t === "pong") {
+            // noteAlive済み。返事そのものに中身はない
           } else if (m.t === "displays") {
             dispCount = m.n ?? 1;
             dispCur = m.cur ?? 0;
@@ -387,9 +442,12 @@ export function renderViewer(app: HTMLElement, hostId: string): void {
         if (dispCount > 1) ctl.send({ t: "disp", n: (dispCur + 1) % dispCount });
       };
     };
-    pc.onconnectionstatechange = () => {
-      if (!pc) return;
-      switch (pc.connectionState) {
+    peer.onconnectionstatechange = () => {
+      // 畳んだ後や、新しい接続要求に差し替えられた後の通知は無視する。
+      // 古い経路が遅れて failed を上げるたびに、生きている接続の再接続が
+      // 走ってしまう。
+      if (pc !== peer) return;
+      switch (peer.connectionState) {
         case "connected":
           setStatus("P2P接続確認済み — 認証します...");
           beginAuthentication();
@@ -409,9 +467,10 @@ export function renderViewer(app: HTMLElement, hostId: string): void {
           break;
       }
     };
-    await pc.setRemoteDescription({ type: "offer", sdp });
-    await pc.setLocalDescription(await pc.createAnswer());
-    const answerSDP = pc.localDescription!.sdp;
+    await peer.setRemoteDescription({ type: "offer", sdp });
+    hostCandidates.open(); // 待たせていたホストの候補をここで適用する
+    await peer.setLocalDescription(await peer.createAnswer());
+    const answerSDP = peer.localDescription!.sdp;
 
     // まずanswerだけを渡してP2P経路を確認する。ホストはこの段階では映像を送らず、
     // DataChannelの入力も捨てる。connectionState=connected になってから下の認証を行う。
@@ -434,7 +493,7 @@ export function renderViewer(app: HTMLElement, hostId: string): void {
     if (!ch.send({ t: "answer", v: PROTOCOL_VERSION, sdp: answerSDP })) {
       throw new Error("接続が別のタブに奪われました");
     }
-    candidateRelay.markAnswerSent();
+    localCandidates.open();
     setStatus("P2P経路を確認中...");
   }
 
@@ -467,7 +526,7 @@ export function renderViewer(app: HTMLElement, hostId: string): void {
       connecting = false;
       setStatus("ホストから応答がありません", true);
       scheduleRetry(2000);
-    }, 45_000);
+    }, CONNECT_TIMEOUT_MS);
   };
 
   const endAttempt = () => {
@@ -517,8 +576,12 @@ export function renderViewer(app: HTMLElement, hostId: string): void {
         nonce?: string;
         reason?: string;
         expected?: number;
+        candidate?: RTCIceCandidateInit;
       };
-      if (m.t === "offer" && m.sdp && m.nonce) {
+      if (m.t === "candidate" && m.candidate) {
+        // ホストのICE候補。offerを適用するまでは溜まる (CandidateGate)。
+        remoteCandidates?.add(m.candidate);
+      } else if (m.t === "offer" && m.sdp && m.nonce) {
         // 認証ダイアログを閉じられた場合もここに来る。放っておくと復帰手段が
         // なくなるので、通常の失敗と同じ再接続の流れに乗せる。
         handleOffer(m.sdp, m.nonce, m.v ?? 0).catch((e) => {
@@ -545,6 +608,7 @@ export function renderViewer(app: HTMLElement, hostId: string): void {
           if (ticket) {
             // チケットの期限切れ。パスキーからやり直せば通る
             ticket = null;
+            clearTicket();
             setStatus("認証し直しています...", true);
             scheduleRetry(500);
           } else {

@@ -1,21 +1,32 @@
-// answer適用前にAddICECandidateを送るとホスト側で受け付けられないため、
-// それまでに集まった候補だけ保持し、answer送信直後に順序どおり流す。
-export class IceCandidateRelay {
+// ICE候補は、相手が受け取れる状態になるまで手元に溜める。溜める理由は
+// 送る側と受ける側で違うが、やることは同じ「ゲートが開くまで保持し、
+// 開いたら集まった順に流す」なので1つにまとめてある。
+//
+// - 送る側: answerを送るまでに集まった候補を先に投げても、ホストはまだ
+//   どの接続要求のものか結び付けられない (answer適用前のAddICECandidateは
+//   受け付けられない)。
+// - 受ける側: ホストはtrickleで候補を送ってくるので、offerの
+//   setRemoteDescription が終わる前に届くことがある。remote description が
+//   無いうちに addIceCandidate すると例外になる。
+//
+// どちらも固定時間で打ち切ってはいけない。モバイル回線でSTUNが遅いときに
+// 候補0件のまま先へ進み、二度と繋がらなくなる。
+export class CandidateGate {
   private queued: RTCIceCandidateInit[] = [];
-  private answerSent = false;
+  private opened = false;
 
-  constructor(private send: (candidate: RTCIceCandidateInit) => void) {}
+  constructor(private flush: (candidate: RTCIceCandidateInit) => void) {}
 
   add(candidate: RTCIceCandidateInit): void {
-    if (this.answerSent) this.send(candidate);
+    if (this.opened) this.flush(candidate);
     else this.queued.push(candidate);
   }
 
-  markAnswerSent(): void {
-    if (this.answerSent) return;
-    this.answerSent = true;
+  open(): void {
+    if (this.opened) return;
+    this.opened = true;
     const queued = this.queued;
     this.queued = [];
-    for (const candidate of queued) this.send(candidate);
+    for (const candidate of queued) this.flush(candidate);
   }
 }

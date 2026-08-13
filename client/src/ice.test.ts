@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { IceCandidateRelay } from "./ice";
+import { CandidateGate } from "./ice";
 
 const candidate = (value: string): RTCIceCandidateInit => ({
   candidate: value,
@@ -7,39 +7,51 @@ const candidate = (value: string): RTCIceCandidateInit => ({
   sdpMLineIndex: 0,
 });
 
-describe("IceCandidateRelay", () => {
-  it("answer前の候補を保持し、answer送信後に全件を順番どおり送る", () => {
-    const send = vi.fn();
-    const relay = new IceCandidateRelay(send);
+describe("CandidateGate", () => {
+  it("開く前の候補を保持し、開いたら全件を順番どおり流す", () => {
+    const flush = vi.fn();
+    const gate = new CandidateGate(flush);
     const first = candidate("candidate:first");
     const second = candidate("candidate:second");
 
-    relay.add(first);
-    relay.add(second);
-    expect(send).not.toHaveBeenCalled();
+    gate.add(first);
+    gate.add(second);
+    expect(flush).not.toHaveBeenCalled();
 
-    relay.markAnswerSent();
-    expect(send.mock.calls).toEqual([[first], [second]]);
+    gate.open();
+    expect(flush.mock.calls).toEqual([[first], [second]]);
   });
 
-  it("answer送信後に集まった候補は待たずに送る", () => {
-    const send = vi.fn();
-    const relay = new IceCandidateRelay(send);
-    relay.markAnswerSent();
+  it("開いた後に集まった候補は待たずに流す", () => {
+    const flush = vi.fn();
+    const gate = new CandidateGate(flush);
+    gate.open();
 
     const late = candidate("candidate:late");
-    relay.add(late);
-    expect(send).toHaveBeenCalledOnce();
-    expect(send).toHaveBeenCalledWith(late);
+    gate.add(late);
+    expect(flush).toHaveBeenCalledOnce();
+    expect(flush).toHaveBeenCalledWith(late);
   });
 
-  it("answer送信通知が重複しても候補を再送しない", () => {
-    const send = vi.fn();
-    const relay = new IceCandidateRelay(send);
-    relay.add(candidate("candidate:once"));
+  it("開く通知が重複しても候補を再送しない", () => {
+    const flush = vi.fn();
+    const gate = new CandidateGate(flush);
+    gate.add(candidate("candidate:once"));
 
-    relay.markAnswerSent();
-    relay.markAnswerSent();
-    expect(send).toHaveBeenCalledOnce();
+    gate.open();
+    gate.open();
+    expect(flush).toHaveBeenCalledOnce();
+  });
+
+  // 受ける側の使い方。ホストはtrickleで候補を送ってくるので、offerの
+  // setRemoteDescription を待つあいだに届いたものを捨ててはいけない。
+  it("開くまでに何件溜まっても取りこぼさない", () => {
+    const flush = vi.fn();
+    const gate = new CandidateGate(flush);
+    const all = ["a", "b", "c", "d", "e"].map(candidate);
+
+    for (const c of all) gate.add(c);
+    gate.open();
+    expect(flush.mock.calls.map(([c]) => c)).toEqual(all);
   });
 });

@@ -11,6 +11,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/pion/webrtc/v4"
+
 	"remotehost/internal/config"
 	"remotehost/internal/display"
 	"remotehost/internal/input"
@@ -129,6 +131,10 @@ const maxAudioBytes = 4 << 20
 
 // クライアントとホスト間のメッセージ仕様。互換性のない片側更新を
 // 認証失敗や無応答として扱わず、更新が必要だと明示する。
+//
+// ホストもICE候補をtrickleで送るようになった (offerに候補が入らなくなった) が、
+// 版は据え置き。片側だけ古いと、バージョン不一致ではなく候補0件のofferとして
+// ICEが黙って失敗するので、クライアント(Pages)とホストは必ず同時に入れ替える。
 const protocolVersion = 1
 
 // offerを送ってからP2P確認と認証が終わるまでの猶予。
@@ -396,7 +402,7 @@ func (a *app) onMessage(msg json.RawMessage, peerIP string) {
 		if a.display < 0 || a.display >= len(mons) {
 			a.display = display.PrimaryIndex(mons)
 		}
-		s, sdp, err := session.New(a.ctx, a.mediaOptions(mons))
+		s, sdp, err := session.New(a.mediaOptions(mons))
 		if err != nil {
 			log.Printf("session: 作成失敗: %v", err)
 			a.client.Send(map[string]any{"t": "error", "reason": "session"})
@@ -428,6 +434,11 @@ func (a *app) onMessage(msg json.RawMessage, peerIP string) {
 		a.client.Send(map[string]any{
 			"t": "offer", "v": protocolVersion, "sdp": sdp,
 			"nonce": base64.RawURLEncoding.EncodeToString(nonce),
+		})
+		// offerを送り終えてから候補を流す。順番が逆だと、クライアントはまだ
+		// remote descriptionを持っておらず候補を捨てることになる。
+		s.SendCandidates(func(c webrtc.ICECandidateInit) {
+			a.client.Send(map[string]any{"t": "candidate", "v": protocolVersion, "candidate": c})
 		})
 		log.Printf("session: offer送信 (認証待ち)")
 
@@ -560,36 +571,47 @@ func (a *app) mediaOptions(mons []display.Monitor) media.Options {
 // onInput はDataChannelメッセージを振り分ける。ディスプレイ切替と音声だけここで拾い、
 // 残りは入力注入へ渡す。
 func (a *app) onInput(data []byte) {
-	var m struct {
-		T   string `json:"t"`
-		N   int    `json:"n"`
-		S   string `json:"s"`
-		Len int    `json:"len"`
-		On  bool   `json:"on"`
-		W   int    `json:"w"`
-		H   int    `json:"h"`
-	}
-	if err := json.Unmarshal(data, &m); err == nil {
-		switch m.T {
-		case "disp":
-			a.switchDisplay(m.N)
-			return
-		case "vis":
-			a.setActive(m.On)
-			return
-		case "view":
-			a.setViewport(m.W, m.H)
-			return
-		case "aud":
-			a.beginAudio(m.Len)
-			return
-		case "voice":
-			// クライアント側で認識した場合 (現在は使っていないが互換のため残す)
-			a.handleVoice(m.S)
-			return
-		}
+	var m controlMsg
+	if err := json.Unmarshal(data, &m); err == nil && a.handleControl(m) {
+		return
 	}
 	input.Handle(data)
+}
+
+// controlMsg はDataChannelで届く、入力操作ではない制御メッセージ。
+type controlMsg struct {
+	T   string `json:"t"`
+	N   int    `json:"n"`
+	S   string `json:"s"`
+	Len int    `json:"len"`
+	On  bool   `json:"on"`
+	W   int    `json:"w"`
+	H   int    `json:"h"`
+}
+
+// handleControl は制御メッセージを処理する。扱ったらtrue。
+// falseなら入力操作としてinputへ渡される。
+func (a *app) handleControl(m controlMsg) bool {
+	switch m.T {
+	case "ping":
+		// 経路の生存確認。クライアントは画面が消えていたあいだに黙って
+		// 切られていないかをこれで確かめる (状態表示はあてにならない)。
+		a.sendPong()
+	case "disp":
+		a.switchDisplay(m.N)
+	case "vis":
+		a.setActive(m.On)
+	case "view":
+		a.setViewport(m.W, m.H)
+	case "aud":
+		a.beginAudio(m.Len)
+	case "voice":
+		// クライアント側で認識した場合 (現在は使っていないが互換のため残す)
+		a.handleVoice(m.S)
+	default:
+		return false
+	}
+	return true
 }
 
 // beginAudio は音声受信の開始通知 {t:"aud", len:<全バイト数>} を受けてバッファを用意する。
@@ -692,6 +714,17 @@ func (a *app) sendTicket(sess *session.Session) {
 	}
 	if err := sess.Send(map[string]any{"t": "ticket", "v": a.pm.IssueTicket()}); err != nil {
 		log.Printf("session: チケット送信失敗: %v", err)
+	}
+}
+
+// sendPong は生存確認への返事。中身は要らない — 届いたこと自体が答えになる。
+func (a *app) sendPong() {
+	sess := a.session()
+	if sess == nil {
+		return
+	}
+	if err := sess.Send(map[string]any{"t": "pong"}); err != nil {
+		log.Printf("session: pong送信失敗: %v", err)
 	}
 }
 

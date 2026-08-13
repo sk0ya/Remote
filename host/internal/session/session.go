@@ -1,6 +1,7 @@
 // Package session は1クライアントとのWebRTCセッションを管理する。
 // ホストがofferを作り、映像トラック(H.264)と入力用DataChannelを持つ。
-// ICEはVanilla方式(gathering完了後にSDP一括交換)で、シグナリングを単純に保つ。
+// ICEは双方向のTrickle方式で、offerは収集を待たずに送り、候補は集まり次第
+// シグナリング経由で流す。
 package session
 
 import (
@@ -11,7 +12,6 @@ import (
 	"net"
 	"strings"
 	"sync"
-	"time"
 
 	"github.com/pion/interceptor"
 	"github.com/pion/webrtc/v4"
@@ -58,14 +58,57 @@ type Session struct {
 	auth        authorizationGate
 	// クライアントが映像を見ているか。スマホがバックグラウンドに回ったり
 	// 画面が消えたりしているあいだは false になり、キャプチャを止める。
-	active    bool
-	OnInput   func(data []byte) // DataChannel "input" のテキスト受信 (操作メッセージ)
-	OnBinary  func(data []byte) // 同バイナリ受信 (音声データのチャンク)
-	OnDCOpen  func()            // DataChannelが開いた(ホスト→クライアント送信可能)
-	OnClosed  func()
-	OnState   func(state string)
+	active   bool
+	OnInput  func(data []byte) // DataChannel "input" のテキスト受信 (操作メッセージ)
+	OnBinary func(data []byte) // 同バイナリ受信 (音声データのチャンク)
+	OnDCOpen func()            // DataChannelが開いた(ホスト→クライアント送信可能)
+	OnClosed func()
+	OnState  func(state string)
+	// 集めた自分のICE候補。offerを送り終えるまでは手元に溜まる。
+	ice candidateGate
+	// ICE候補の集計。書くのはICEの収集ゴルーチン、読むのは接続状態の
+	// 変化を扱うゴルーチンなので、必ずロック越しに扱う。
+	iceMu     sync.Mutex
 	localICE  candidateSummary
 	remoteICE candidateSummary
+}
+
+// candidateGate は自分のICE候補を、送り先が決まるまで手元に溜める。
+// offerより先に候補を送っても、クライアントはまだどの接続要求のものか
+// 結び付けられない (remote descriptionが無いとaddIceCandidateは弾かれる)。
+type candidateGate struct {
+	mu     sync.Mutex
+	send   func(webrtc.ICECandidateInit)
+	queued []webrtc.ICECandidateInit
+}
+
+func (g *candidateGate) add(c webrtc.ICECandidateInit) {
+	g.mu.Lock()
+	if g.send == nil {
+		g.queued = append(g.queued, c)
+		g.mu.Unlock()
+		return
+	}
+	send := g.send
+	g.mu.Unlock()
+	send(c)
+}
+
+// open は送り先を決め、溜めていた候補を集まった順に流す。
+// 二度目以降は何もしない(同じ候補を二重に送らない)。
+func (g *candidateGate) open(send func(webrtc.ICECandidateInit)) {
+	g.mu.Lock()
+	if g.send != nil || send == nil {
+		g.mu.Unlock()
+		return
+	}
+	g.send = send
+	queued := g.queued
+	g.queued = nil
+	g.mu.Unlock()
+	for _, c := range queued {
+		send(c)
+	}
 }
 
 // fmtpLine は実際に送るストリームに見合ったSDPのfmtp行を組み立てる。
@@ -90,8 +133,12 @@ func sameCapture(a, b hostmedia.Options) bool {
 		a.FPS == b.FPS && a.BitrateMbps == b.BitrateMbps
 }
 
-// New はPeerConnectionを作り、gathering完了済みのoffer SDPを返す。
-func New(ctx context.Context, mediaOpts hostmedia.Options) (*Session, string, error) {
+// New はPeerConnectionを作り、offer SDPを返す。
+//
+// ICE収集の完了は待たない。待つと、STUNの応答が遅い回線ではその数秒がまるごと
+// 「接続要求を出したのに何も起きない」時間になる。候補はこの後 SendCandidates で
+// 送り先を決めてから、集まり次第クライアントへ流す。
+func New(mediaOpts hostmedia.Options) (*Session, string, error) {
 	pc, err := newPeerConnection(webrtc.Configuration{ICEServers: iceServers})
 	if err != nil {
 		return nil, "", err
@@ -145,6 +192,18 @@ func New(ctx context.Context, mediaOpts hostmedia.Options) (*Session, string, er
 		}
 	})
 
+	pc.OnICECandidate(func(c *webrtc.ICECandidate) {
+		if c == nil {
+			s.logLocalCandidates() // 収集完了
+			return
+		}
+		init := c.ToJSON()
+		s.iceMu.Lock()
+		s.localICE.addLine(init.Candidate)
+		s.iceMu.Unlock()
+		s.ice.add(init)
+	})
+
 	pc.OnConnectionStateChange(func(state webrtc.PeerConnectionState) {
 		log.Printf("session: 状態 %s", state)
 		if s.OnState != nil {
@@ -159,7 +218,10 @@ func New(ctx context.Context, mediaOpts hostmedia.Options) (*Session, string, er
 		case webrtc.PeerConnectionStateFailed, webrtc.PeerConnectionStateClosed,
 			webrtc.PeerConnectionStateDisconnected:
 			if state == webrtc.PeerConnectionStateFailed {
-				log.Printf("session: P2P確立に失敗 — %s", diagnoseICEFailure(s.localICE, s.remoteICE))
+				s.iceMu.Lock()
+				local, remote := s.localICE, s.remoteICE
+				s.iceMu.Unlock()
+				log.Printf("session: P2P確立に失敗 — %s", diagnoseICEFailure(local, remote))
 			}
 			s.stopMedia()
 			if state != webrtc.PeerConnectionStateDisconnected && s.OnClosed != nil {
@@ -173,23 +235,21 @@ func New(ctx context.Context, mediaOpts hostmedia.Options) (*Session, string, er
 		pc.Close()
 		return nil, "", err
 	}
-	gatherDone := webrtc.GatheringCompletePromise(pc)
 	if err := pc.SetLocalDescription(offer); err != nil {
 		pc.Close()
 		return nil, "", err
 	}
-	select {
-	case <-gatherDone:
-	case <-time.After(10 * time.Second):
-		pc.Close()
-		return nil, "", fmt.Errorf("ICE gathering タイムアウト")
-	case <-ctx.Done():
-		pc.Close()
-		return nil, "", ctx.Err()
-	}
-	sdp := pc.LocalDescription().SDP
-	s.localICE = logCandidates("ホスト", sdp)
-	return s, sdp, nil
+	// 返すのは CreateOffer が作ったSDPそのもの。pc.LocalDescription() は
+	// 呼んだ時点までに集まった候補を混ぜて返すため、収集と並行して読むと
+	// 中身が呼ぶたびに変わる。認証チャレンジはこのSDP文字列を含むので、
+	// クライアントと1バイトも違ってはいけない。
+	return s, offer.SDP, nil
+}
+
+// SendCandidates は集めたICE候補の送り先を決める。offerを送り終えてから呼ぶ。
+// それまでに集まっていた候補も、ここで順にまとめて流れる。
+func (s *Session) SendCandidates(send func(webrtc.ICECandidateInit)) {
+	s.ice.open(send)
 }
 
 type candidateSummary struct {
@@ -200,52 +260,69 @@ type candidateSummary struct {
 	relay    int
 }
 
+// addLine は候補1つを数える。SDPの "a=candidate:..." でも、trickleで1つずつ
+// 届く "candidate:..." でも同じ集計になるよう、頭の "a=" は落として見る。
+func (s *candidateSummary) addLine(line string) {
+	line = strings.TrimPrefix(strings.TrimSpace(line), "a=")
+	fields := strings.Fields(line)
+	if len(fields) < 8 || !strings.HasPrefix(fields[0], "candidate:") || fields[6] != "typ" {
+		return
+	}
+	typ, address := fields[7], fields[4]
+	family := "name"
+	if ip := net.ParseIP(address); ip != nil {
+		if ip.To4() != nil {
+			family = "v4"
+		} else {
+			family = "v6"
+		}
+		// srflx/relay は外部から見える候補。host はグローバルアドレスだけを
+		// 到達可能と数え、LAN内・リンクローカルを誤診断に使わない。
+		public := typ == "srflx" || typ == "relay" ||
+			(typ == "host" && ip.IsGlobalUnicast() && !ip.IsPrivate())
+		if public && family == "v4" {
+			s.publicV4 = true
+		}
+		if public && family == "v6" {
+			s.publicV6 = true
+		}
+	}
+	if s.counts == nil {
+		s.counts = map[string]map[string]int{}
+	}
+	if s.counts[typ] == nil {
+		s.counts[typ] = map[string]int{}
+	}
+	s.counts[typ][family]++
+	s.total++
+	if typ == "relay" {
+		s.relay++
+	}
+}
+
 func summarizeCandidates(sdp string) candidateSummary {
-	s := candidateSummary{counts: map[string]map[string]int{}}
+	var s candidateSummary
 	for _, line := range strings.Split(sdp, "\n") {
-		fields := strings.Fields(strings.TrimSpace(line))
-		if len(fields) < 8 || !strings.HasPrefix(fields[0], "a=candidate:") || fields[6] != "typ" {
-			continue
-		}
-		typ, address := fields[7], fields[4]
-		family := "name"
-		if ip := net.ParseIP(address); ip != nil {
-			if ip.To4() != nil {
-				family = "v4"
-			} else {
-				family = "v6"
-			}
-			// srflx/relay は外部から見える候補。host はグローバルアドレスだけを
-			// 到達可能と数え、LAN内・リンクローカルを誤診断に使わない。
-			public := typ == "srflx" || typ == "relay" ||
-				(typ == "host" && ip.IsGlobalUnicast() && !ip.IsPrivate())
-			if public && family == "v4" {
-				s.publicV4 = true
-			}
-			if public && family == "v6" {
-				s.publicV6 = true
-			}
-		}
-		if s.counts[typ] == nil {
-			s.counts[typ] = map[string]int{}
-		}
-		s.counts[typ][family]++
-		s.total++
-		if typ == "relay" {
-			s.relay++
-		}
+		s.addLine(line)
 	}
 	return s
 }
 
 func (s candidateSummary) count(typ, family string) int { return s.counts[typ][family] }
 
-func logCandidates(side, sdp string) candidateSummary {
-	s := summarizeCandidates(sdp)
-	log.Printf("session: ICE候補(%s) host[v4=%d v6=%d name=%d] srflx[v4=%d v6=%d] relay=%d",
-		side, s.count("host", "v4"), s.count("host", "v6"), s.count("host", "name"),
+func (s candidateSummary) String() string {
+	return fmt.Sprintf("host[v4=%d v6=%d name=%d] srflx[v4=%d v6=%d] relay=%d",
+		s.count("host", "v4"), s.count("host", "v6"), s.count("host", "name"),
 		s.count("srflx", "v4"), s.count("srflx", "v6"), s.relay)
-	return s
+}
+
+// logLocalCandidates は自分の候補の収集が終わった時点の内訳を残す。
+// trickleでは1つずつ届くので、SDPからまとめて数えることはできない。
+func (s *Session) logLocalCandidates() {
+	s.iceMu.Lock()
+	summary := s.localICE
+	s.iceMu.Unlock()
+	log.Printf("session: ICE候補(ホスト) %s", summary)
 }
 
 func diagnoseICEFailure(local, remote candidateSummary) string {
@@ -265,7 +342,11 @@ func diagnoseICEFailure(local, remote candidateSummary) string {
 }
 
 func (s *Session) HandleAnswer(sdp string) error {
-	s.remoteICE = logCandidates("クライアント", sdp)
+	remote := summarizeCandidates(sdp)
+	log.Printf("session: ICE候補(クライアント) %s", remote)
+	s.iceMu.Lock()
+	s.remoteICE = remote
+	s.iceMu.Unlock()
 	return s.pc.SetRemoteDescription(webrtc.SessionDescription{
 		Type: webrtc.SDPTypeAnswer,
 		SDP:  sdp,
@@ -277,6 +358,11 @@ func (s *Session) AddICECandidate(candidate string, sdpMid *string, sdpMLineInde
 	if candidate == "" {
 		return nil
 	}
+	// answerに候補が載らない(クライアントもtrickle)ので、失敗時の診断に使う
+	// 集計はここで積む。
+	s.iceMu.Lock()
+	s.remoteICE.addLine(candidate)
+	s.iceMu.Unlock()
 	log.Printf("session: クライアントICE候補を追加")
 	return s.pc.AddICECandidate(webrtc.ICECandidateInit{
 		Candidate:        candidate,

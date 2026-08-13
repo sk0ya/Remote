@@ -3,7 +3,10 @@ package main
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"testing"
+
+	"github.com/pion/webrtc/v4"
 )
 
 type candidateRecorder struct {
@@ -37,7 +40,9 @@ func TestApplyICECandidatePreservesAllFields(t *testing.T) {
 }
 
 func TestClientCandidateJSONContract(t *testing.T) {
-	const payload = `{"t":"candidate","v":1,"candidate":{"candidate":"candidate:1 1 UDP 1 192.0.2.1 5000 typ host","sdpMid":"0","sdpMLineIndex":0,"usernameFragment":"ice-user"}}`
+	payload := fmt.Sprintf(
+		`{"t":"candidate","v":%d,"candidate":{"candidate":"candidate:1 1 UDP 1 192.0.2.1 5000 typ host","sdpMid":"0","sdpMLineIndex":0,"usernameFragment":"ice-user"}}`,
+		protocolVersion)
 	var msg clientMsg
 	if err := json.Unmarshal([]byte(payload), &msg); err != nil {
 		t.Fatal(err)
@@ -50,6 +55,54 @@ func TestClientCandidateJSONContract(t *testing.T) {
 		*recorder.sdpMid != "0" || recorder.sdpMLineIndex == nil || *recorder.sdpMLineIndex != 0 ||
 		recorder.usernameFragment == nil || *recorder.usernameFragment != "ice-user" {
 		t.Fatalf("クライアントとのcandidate契約が不一致: msg=%#v recorder=%#v", msg, recorder)
+	}
+}
+
+// ホスト側の候補もtrickleで送る。クライアントはこれをそのまま
+// RTCPeerConnection.addIceCandidate へ渡すので、フィールド名が1つでも
+// 違うと候補が無視され、映像が出ないまま接続だけが失敗する。
+func TestHostCandidateJSONContract(t *testing.T) {
+	mid, username := "0", "ice-user"
+	line := uint16(0)
+	sent := map[string]any{"t": "candidate", "v": protocolVersion, "candidate": webrtc.ICECandidateInit{
+		Candidate:        "candidate:1 1 UDP 1 192.0.2.1 5000 typ host",
+		SDPMid:           &mid,
+		SDPMLineIndex:    &line,
+		UsernameFragment: &username,
+	}}
+	data, err := json.Marshal(sent)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// クライアントの読み方 (viewer.ts の onMessage) と同じ形で読み戻す
+	var got struct {
+		T         string           `json:"t"`
+		Version   int              `json:"v"`
+		Candidate *iceCandidateMsg `json:"candidate"`
+	}
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.T != "candidate" || got.Version != protocolVersion || got.Candidate == nil {
+		t.Fatalf("ホストのcandidateメッセージが読み戻せない: %s", data)
+	}
+	if got.Candidate.Candidate == "" || got.Candidate.SDPMid == nil || *got.Candidate.SDPMid != mid ||
+		got.Candidate.SDPMLineIndex == nil || *got.Candidate.SDPMLineIndex != line ||
+		got.Candidate.UsernameFragment == nil || *got.Candidate.UsernameFragment != username {
+		t.Fatalf("候補のフィールドが欠落: %s", data)
+	}
+}
+
+// 生存確認は入力操作ではない。inputへ落ちると、経路の確認のたびに
+// マウスやキーボードの注入を試みることになる。
+func TestPingIsHandledAsControlNotInput(t *testing.T) {
+	a := &app{} // セッション未確立でも落ちないこと (返す相手が居ないだけ)
+	if !a.handleControl(controlMsg{T: "ping"}) {
+		t.Fatal("pingが制御メッセージとして扱われていない")
+	}
+	if a.handleControl(controlMsg{T: "mv"}) {
+		t.Fatal("マウス移動を制御メッセージとして飲み込んでいる")
 	}
 }
 
