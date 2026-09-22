@@ -21,9 +21,11 @@ const ICE_SERVERS: RTCIceServer[] = [
 
 // 接続要求を出してからofferが返るまでの猶予。
 // ホストはtrickle ICEなので、収集の完了を待たずにofferを送ってくる。
-// 中継サーバーを1往復するだけの時間で足り、これを過ぎたら何かがおかしい。
+// 普段は中継サーバーを1往復するだけで返るが、遅いモバイル回線や起動直後の
+// ホストでは数秒かかる。短すぎると応答待ちの要求に2本目を重ね、後から来た
+// offerが先の試行(認証ダイアログごと)を潰してしまう。
 // 長く取ると、届かなかった要求のために黙って待つ時間がそのまま伸びる。
-const CONNECT_TIMEOUT_MS = 2_000;
+const CONNECT_TIMEOUT_MS = 5_000;
 // offer待ちとは別に、P2P探索だけに猶予を設ける。認証ダイアログは打ち切らない。
 const PEER_TIMEOUT_MS = 30_000;
 
@@ -207,7 +209,8 @@ export function renderViewer(app: HTMLElement, hostId: string): void {
       ch.connect();
     } else if (pc?.connectionState !== "connected") {
       requestConnect();
-    } else {
+    } else if (authenticated) {
+      // 認証前はホストがDataChannelを捨てるので、確認しても返事は来ない
       probe?.monitor();
     }
   }
@@ -503,7 +506,10 @@ export function renderViewer(app: HTMLElement, hostId: string): void {
         case "disconnected":
           endAttempt();
           setStatus("接続が不安定です...", true);
-          scheduleRetry(500);
+          // disconnected は回線の切り替えなどで一時的に出て、数秒で自然に戻ることが多い。
+          // すぐ張り直すと、戻るはずだった経路と認証を捨てることになる。
+          // 戻れば connected で retryTimer が解除される。
+          scheduleRetry(3000);
           break;
       }
     };
