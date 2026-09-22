@@ -16,9 +16,9 @@ export interface SignalEvents {
 
 // keepalive間隔。モバイル回線のNATや中継は無通信のWebSocketを黙って切る。
 // サーバーはこの文字列にだけ "pong" を自動応答する。
-export const PING_MS = 25_000;
+export const PING_MS = 2_000;
 
-// pingを送ってからこれだけ無音なら、経路が死んだとみなしてソケットを畳む。
+// それぞれのpingに対する応答待ち時間。期限切れが連続したときだけソケットを畳む。
 //
 // 切られるときにFINが飛んでくるとは限らない。モバイルでは画面を消している
 // あいだにNATや基地局が黙って流れを落とすのが普通で、そのあとも
@@ -26,14 +26,16 @@ export const PING_MS = 25_000;
 // 応答を確かめる仕組みが無いと、クライアントは死んだソケットへ接続要求を
 // 投げ込んで、来るはずのない返事をタイムアウトまで待つことになる。
 // (ホスト側は internal/signal の readTimeout が同じ役目をしている)
-export const PONG_TIMEOUT_MS = 10_000;
+export const PONG_TIMEOUT_MS = 5_000;
+export const PONG_MISSES_BEFORE_DEAD = 3;
 
 export class SignalChannel {
   private ws: WebSocket | null = null;
   private closed = false;
   private pingTimer = 0;
-  // ping送信中の応答待ち。何か1つでも届けば解除する。
-  private deadTimer = 0;
+  // 未応答pingごとのタイマー。何か1つでも届けばすべて解除する。
+  private readonly pendingPongTimers = new Set<number>();
+  private missedPongs = 0;
   // 画面を見ているあいだだけ true。非表示のあいだのpingは、誰も待っていない
   // 通信のためにモバイル回線のモデムをアイドル状態から起こし続けるだけになる。
   private activeState = true;
@@ -116,30 +118,32 @@ export class SignalChannel {
     this.activeState = on;
     this.restartPing();
     // 戻ってきた瞬間に生きているかを確かめる。眠っているあいだに黙って
-    // 切られているのがむしろ普通で、次のping(25秒後)まで待つと、そのあいだ
-    // 死んだソケットへ接続要求を投げ続けることになる。
+    // 切られていることがあるため、次の定期pingを待たずに問い合わせる。
     if (on) this.ping();
   }
 
   private ping(): void {
     if (this.ws?.readyState !== WebSocket.OPEN) return;
-    // 待ち始めてから送る。応答が先に届いても取り消せるようにしておく
-    // (既に応答待ちなら待ち時間は伸ばさない)。
-    if (!this.deadTimer) {
-      this.deadTimer = window.setTimeout(() => this.giveUp(), PONG_TIMEOUT_MS);
-    }
+    // pingごとに応答期限を持たせ、遅延や単発の欠落だけでは切断しない。
+    let timer = 0;
+    timer = window.setTimeout(() => {
+      this.pendingPongTimers.delete(timer);
+      this.missedPongs++;
+      if (this.missedPongs >= PONG_MISSES_BEFORE_DEAD) this.giveUp();
+    }, PONG_TIMEOUT_MS);
+    this.pendingPongTimers.add(timer);
     this.ws.send("ping");
   }
 
   private noteAlive(): void {
-    clearTimeout(this.deadTimer);
-    this.deadTimer = 0;
+    for (const timer of this.pendingPongTimers) clearTimeout(timer);
+    this.pendingPongTimers.clear();
+    this.missedPongs = 0;
   }
 
-  // 応答が返らなかった。ソケットは開いているように見えるが経路は死んでいる。
-  // 自分から畳んで、通常の切断と同じ再接続の流れに乗せる。
+  // 応答待ちが連続して期限切れになった。ソケットは開いて見えても経路が死んでいる。
+  // 通常の切断と同じ再接続の流れに乗せる。
   private giveUp(): void {
-    this.deadTimer = 0;
     this.dropSocket();
     if (!this.closed) this.events.onClose?.("応答なし (keepalive タイムアウト)");
   }
@@ -150,8 +154,7 @@ export class SignalChannel {
     this.ws = null;
     clearInterval(this.pingTimer);
     this.pingTimer = 0;
-    clearTimeout(this.deadTimer);
-    this.deadTimer = 0;
+    this.noteAlive();
     if (!ws) return;
     ws.onopen = null;
     ws.onmessage = null;

@@ -1,9 +1,16 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { PeerProbe, PROBE_TIMEOUT_MS } from "./liveness";
+import {
+  PeerProbe,
+  PROBE_INTERVAL_MS,
+  PROBE_MISSES_BEFORE_DEAD,
+  PROBE_TIMEOUT_MS,
+} from "./liveness";
 
 beforeEach(() => {
   vi.useFakeTimers();
   vi.stubGlobal("window", {
+    setInterval: (fn: () => void, ms: number) => setInterval(fn, ms),
+    clearInterval: (id: number) => clearInterval(id),
     setTimeout: (fn: () => void, ms: number) => setTimeout(fn, ms),
     clearTimeout: (id: number) => clearTimeout(id),
   });
@@ -76,5 +83,39 @@ describe("PeerProbe", () => {
 
     vi.advanceTimersByTime(PROBE_TIMEOUT_MS * 3);
     expect(onDead).not.toHaveBeenCalled();
+  });
+
+  it("monitorは表示中の経路を定期的に確認する", () => {
+    const send = vi.fn();
+    const onDead = vi.fn();
+    const probe = new PeerProbe(send, onDead);
+
+    probe.monitor();
+    expect(send).toHaveBeenCalledOnce();
+    probe.noteAlive();
+
+    vi.advanceTimersByTime(PROBE_INTERVAL_MS);
+    expect(send).toHaveBeenCalledTimes(2);
+    probe.noteAlive();
+
+    probe.stop();
+    vi.advanceTimersByTime(PROBE_INTERVAL_MS * 2);
+    expect(send).toHaveBeenCalledTimes(2);
+    expect(onDead).not.toHaveBeenCalled();
+  });
+
+  it("monitorは応答が無ければ監視を止めて死亡を知らせる", () => {
+    const onDead = vi.fn();
+    const probe = new PeerProbe(vi.fn(), onDead);
+
+    probe.monitor();
+    vi.advanceTimersByTime(
+      PROBE_TIMEOUT_MS * PROBE_MISSES_BEFORE_DEAD +
+        PROBE_INTERVAL_MS * (PROBE_MISSES_BEFORE_DEAD - 1)
+    );
+    expect(onDead).toHaveBeenCalledOnce();
+
+    vi.advanceTimersByTime(PROBE_INTERVAL_MS * 2);
+    expect(onDead).toHaveBeenCalledOnce();
   });
 });

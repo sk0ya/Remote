@@ -23,7 +23,9 @@ const ICE_SERVERS: RTCIceServer[] = [
 // ホストはtrickle ICEなので、収集の完了を待たずにofferを送ってくる。
 // 中継サーバーを1往復するだけの時間で足り、これを過ぎたら何かがおかしい。
 // 長く取ると、届かなかった要求のために黙って待つ時間がそのまま伸びる。
-const CONNECT_TIMEOUT_MS = 10_000;
+const CONNECT_TIMEOUT_MS = 2_000;
+// offer待ちとは別に、P2P探索だけに猶予を設ける。認証ダイアログは打ち切らない。
+const PEER_TIMEOUT_MS = 30_000;
 
 // レイアウトの検証(test/layout.mjs)からも同じものを組み立てるので外に出す。
 export const VIEWER_HTML = `
@@ -88,6 +90,7 @@ export function renderViewer(app: HTMLElement, hostId: string): void {
   // 撃つと、1回の切断で認証ダイアログが何枚も開いてしまうため1本に絞る。
   let connecting = false;
   let connectTimer = 0;
+  let peerTimer = 0;
   // シグナリング(WebSocket)自体の再接続。接続成功でリセットする。
   let signalRetries = 0;
   let signalTimer = 0;
@@ -99,6 +102,7 @@ export function renderViewer(app: HTMLElement, hostId: string): void {
   // 今のP2P経路が確立した後にだけ実行する認証処理。
   let authenticateCurrent: (() => Promise<void>) | null = null;
   let authenticating = false;
+  let authenticated = false;
   // ホストのディスプレイ数と表示中index (ホストからの "displays" 通知で更新)
   let dispCount = 1;
   let dispCur = 0;
@@ -110,6 +114,7 @@ export function renderViewer(app: HTMLElement, hostId: string): void {
 
   const cleanup = () => {
     exited = true;
+    clearTimeout(peerTimer);
     clearTimeout(retryTimer);
     clearTimeout(connectTimer);
     clearTimeout(signalTimer);
@@ -203,7 +208,7 @@ export function renderViewer(app: HTMLElement, hostId: string): void {
     } else if (pc?.connectionState !== "connected") {
       requestConnect();
     } else {
-      probe?.start();
+      probe?.monitor();
     }
   }
 
@@ -227,7 +232,7 @@ export function renderViewer(app: HTMLElement, hostId: string): void {
     }
     retries++;
     retryTimer = window.setTimeout(() => {
-      if (!exited) requestConnect();
+      if (!exited && !hidden) requestConnect();
     }, delayMs);
   };
 
@@ -236,9 +241,7 @@ export function renderViewer(app: HTMLElement, hostId: string): void {
   // close() では connectionstatechange が飛ばないので、後始末はここで行う。
   const dropPeer = () => {
     if (exited || halted || hidden) return;
-    probe?.stop();
-    pc?.close();
-    pc = null;
+    resetPeer();
     endAttempt();
     setStatus("接続が切れています — 再接続します...", true);
     requestConnect();
@@ -278,24 +281,46 @@ export function renderViewer(app: HTMLElement, hostId: string): void {
     toastTimer = window.setTimeout(() => setStatus(""), ms);
   };
 
+  // 現在のP2P試行を破棄する。認証失敗時にPeerConnectionを残すと、
+  // requestConnect() が「connectedのまま」と判断して再試行を止めてしまう。
+  const resetPeer = () => {
+    clearTimeout(peerTimer);
+    remoteCandidates = null;
+    const oldPc = pc;
+    pc = null;
+    probe?.stop();
+    probe = null;
+    authenticateCurrent = null;
+    authenticating = false;
+    authenticated = false;
+    oldPc?.close();
+  };
+
   async function handleOffer(sdp: string, nonce: string, version: number): Promise<void> {
     if (version !== PROTOCOL_VERSION) {
       halt(`PC側とのバージョンが一致しません (PC: v${version || "?"} / この端末: v${PROTOCOL_VERSION})。`);
       return;
     }
-    pc?.close();
-    authenticateCurrent = null;
-    authenticating = false;
+    resetPeer();
     const peer = new RTCPeerConnection({ iceServers: ICE_SERVERS });
     pc = peer;
+    const isCurrent = () => pc === peer && !exited && !halted;
+    peerTimer = window.setTimeout(() => {
+      if (!isCurrent() || peer.connectionState === "connected") return;
+      resetPeer();
+      endAttempt();
+      setStatus("P2P経路が見つかりません — 再接続します...", true);
+      scheduleRetry(1000);
+    }, PEER_TIMEOUT_MS);
     // answer送信前に集まった候補はいったん保持し、answer適用後は逐次送る。
     // 固定時間でICE収集を打ち切ると、モバイル回線でSTUNが遅い場合に
     // candidate 0件のanswerを送って接続不能になる。
     const localCandidates = new CandidateGate((candidate) => {
+      if (!isCurrent()) return;
       ch.send({ t: "candidate", v: PROTOCOL_VERSION, candidate });
     });
     peer.onicecandidate = (ev) => {
-      if (!ev.candidate) return;
+      if (!isCurrent() || !ev.candidate) return;
       localCandidates.add(ev.candidate.toJSON());
     };
     // ホスト側の候補も同じくtrickleで届く。setRemoteDescription より先に
@@ -309,6 +334,7 @@ export function renderViewer(app: HTMLElement, hostId: string): void {
     });
     const hostCandidates = remoteCandidates;
     peer.ontrack = (ev) => {
+      if (!isCurrent()) return;
       video.srcObject = ev.streams[0] ?? new MediaStream([ev.track]);
       // 端末が自動再生を止めることがある。復帰の手段はステータス表示には
       // 載せない — ステータスは接続の進行で何度も書き換わるので、そのたびに
@@ -319,7 +345,7 @@ export function renderViewer(app: HTMLElement, hostId: string): void {
         .catch(() => playgate.show());
     };
     peer.ondatachannel = (ev) => {
-      if (ev.channel.label !== "input") return;
+      if (!isCurrent() || ev.channel.label !== "input") return;
       controller?.dispose(); // 再接続時に古い購読を残さない
       controller = new InputController(video, surface, ev.channel);
       const ctl = controller;
@@ -328,6 +354,13 @@ export function renderViewer(app: HTMLElement, hostId: string): void {
         (msg) => ctl.send(msg),
         () => dropPeer()
       );
+      ev.channel.onclose = () => {
+        if (pc === peer) dropPeer();
+      };
+      ev.channel.onerror = () => {
+        if (pc === peer) dropPeer();
+      };
+      if (authenticated) probe.monitor();
       keyboard?.dispose(); // 再接続で古いキーボードのDOMを残さない
       keyboard = new VirtualKeyboard(
         vroot,
@@ -406,6 +439,7 @@ export function renderViewer(app: HTMLElement, hostId: string): void {
       }
       // ホスト→クライアント通知 (ディスプレイ情報・音声の処理結果)
       ev.channel.onmessage = (me) => {
+        if (!isCurrent()) return;
         probe?.noteAlive(); // 中身によらず、届いた時点で経路は生きている
         try {
           const m = JSON.parse(String(me.data)) as {
@@ -453,6 +487,8 @@ export function renderViewer(app: HTMLElement, hostId: string): void {
       if (pc !== peer) return;
       switch (peer.connectionState) {
         case "connected":
+          clearTimeout(peerTimer);
+          clearTimeout(retryTimer);
           setStatus("P2P接続確認済み — 認証します...");
           beginAuthentication();
           break;
@@ -462,18 +498,22 @@ export function renderViewer(app: HTMLElement, hostId: string): void {
         case "failed":
           endAttempt();
           setStatus("P2P接続失敗 — 再接続します...", true);
-          scheduleRetry(3000);
+          scheduleRetry(500);
           break;
         case "disconnected":
           endAttempt();
           setStatus("接続が不安定です...", true);
-          scheduleRetry(5000);
+          scheduleRetry(500);
           break;
       }
     };
     await peer.setRemoteDescription({ type: "offer", sdp });
+    if (!isCurrent()) return;
     hostCandidates.open(); // 待たせていたホストの候補をここで適用する
-    await peer.setLocalDescription(await peer.createAnswer());
+    const answer = await peer.createAnswer();
+    if (!isCurrent()) return;
+    await peer.setLocalDescription(answer);
+    if (!isCurrent()) return;
     const answerSDP = peer.localDescription!.sdp;
 
     // まずanswerだけを渡してP2P経路を確認する。ホストはこの段階では映像を送らず、
@@ -486,9 +526,11 @@ export function renderViewer(app: HTMLElement, hostId: string): void {
       } else {
         setStatus("パスキーで認証中...");
         const assertion = await assertPasskey(b64uDecode(nonce), sdp, answerSDP, loadCredId());
+        if (!isCurrent()) return;
         saveCredId(assertion.credId);
         auth = { ...assertion };
       }
+      if (!isCurrent()) return;
       if (!ch.send({ t: "auth", v: PROTOCOL_VERSION, ...auth })) {
         throw new Error("接続が別のタブに奪われました");
       }
@@ -504,16 +546,18 @@ export function renderViewer(app: HTMLElement, hostId: string): void {
   const beginAuthentication = () => {
     if (authenticating || !authenticateCurrent) return;
     authenticating = true;
+    const authenticatingPeer = pc;
     authenticateCurrent().catch((e) => {
-      pc?.close();
+      if (pc !== authenticatingPeer || exited || halted) return;
+      resetPeer();
       endAttempt();
       setStatus(`接続に失敗しました: ${e}`, true);
-      scheduleRetry(3000);
+      scheduleRetry(1000);
     });
   };
 
   const requestConnect = () => {
-    if (halted || connecting) return;
+    if (exited || halted || hidden || connecting) return;
     // シグナリングが瞬断しただけならP2Pは生きている。張り直す必要はない
     // (再ネゴシエーションは映像の途切れと、チケットが無ければ認証ダイアログを招く)。
     if (pc?.connectionState === "connected") return;
@@ -541,6 +585,7 @@ export function renderViewer(app: HTMLElement, hostId: string): void {
   // これ以上試しても無駄な状態。部屋を明け渡して、他のタブの邪魔をしないようにする。
   const halt = (text: string) => {
     halted = true;
+    clearTimeout(peerTimer);
     endAttempt();
     clearTimeout(retryTimer);
     clearTimeout(signalTimer);
@@ -588,16 +633,27 @@ export function renderViewer(app: HTMLElement, hostId: string): void {
       } else if (m.t === "offer" && m.sdp && m.nonce) {
         // 認証ダイアログを閉じられた場合もここに来る。放っておくと復帰手段が
         // なくなるので、通常の失敗と同じ再接続の流れに乗せる。
-        handleOffer(m.sdp, m.nonce, m.v ?? 0).catch((e) => {
+        // offer到着後はoffer待ちタイマーを解除する。ICEや認証が時間を使っても、
+        // 別のofferを重ねて古いanswer/ICEを壊さない。
+        clearTimeout(connectTimer);
+        clearTimeout(retryTimer);
+        connecting = true;
+        const offerTask = handleOffer(m.sdp, m.nonce, m.v ?? 0);
+        const offeredPeer = pc;
+        offerTask.catch((e) => {
+          if (pc !== offeredPeer || exited || halted) return;
+          resetPeer();
           endAttempt();
           setStatus(`接続に失敗しました: ${e}`, true);
-          scheduleRetry(3000);
+          scheduleRetry(500);
         });
       } else if (m.t === "ready-auth") {
         beginAuthentication();
       } else if (m.t === "auth-ok") {
         retries = 0;
         endAttempt();
+        authenticated = true;
+        probe?.monitor();
         // DataChannelは認証前に開くため、その時点で送った初期状態はホスト側で
         // 意図的に破棄される。解禁直後に現在値を送り直し、送出解像度と
         // バックグラウンド時のキャプチャ停止を確実に反映する。
@@ -609,6 +665,7 @@ export function renderViewer(app: HTMLElement, hostId: string): void {
           halt(`PC側とのバージョンが一致しません (必要: v${m.expected ?? "?"})。`);
         } else if (m.reason === "auth") {
           endAttempt();
+          resetPeer();
           if (ticket) {
             // チケットの期限切れ。パスキーからやり直せば通る
             ticket = null;
@@ -622,6 +679,7 @@ export function renderViewer(app: HTMLElement, hostId: string): void {
           halt("PC側に端末が登録されていません。QRコードからペアリングしてください。");
         } else if (m.reason === "timeout") {
           endAttempt();
+          resetPeer();
           setStatus("認証待ちの時間切れです — もう一度お試しください", true);
           scheduleRetry(1000);
         } else {

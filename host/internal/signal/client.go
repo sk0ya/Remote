@@ -16,13 +16,16 @@ const (
 	// keepalive。待機中は何分も無通信になるため、経路上のNATや中継に
 	// アイドルとみなされて切られる(実際、数十分〜数時間おきにEOFで落ちていた)。
 	// サーバーはこの文字列に自動応答するので、部屋の状態には影響しない。
-	pingInterval = 25 * time.Second
+	pingInterval = 10 * time.Second
 	ping         = "ping"
 	pong         = "pong"
 	// pingを送っても応答が返らないまま無通信が続いたら経路が死んだとみなす。
 	// TCPが半分だけ死ぬとReadはEOFすら返さずブロックし続けるため、
 	// これが無いとホストは「繋がっているつもり」で無応答になる。
-	readTimeout = 70 * time.Second
+	// pingIntervalより十分長く取りつつ、切断後に部屋から消えるまでの
+	// 待ち時間を短くする。クライアントが先に再接続しても、古いhostソケット
+	// が残っていると新しい接続要求がそこへ転送されてしまう。
+	readTimeout = 30 * time.Second
 
 	minBackoff = time.Second
 	maxBackoff = 30 * time.Second

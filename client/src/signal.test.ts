@@ -1,5 +1,10 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { SignalChannel, PING_MS, PONG_TIMEOUT_MS } from "./signal";
+import {
+  SignalChannel,
+  PING_MS,
+  PONG_MISSES_BEFORE_DEAD,
+  PONG_TIMEOUT_MS,
+} from "./signal";
 
 // 最低限のWebSocketの替え玉。送られた文字列を記録する。
 class FakeSocket {
@@ -65,7 +70,7 @@ describe("SignalChannel の keepalive", () => {
     expect(ws.pings).toBe(3);
   });
 
-  // モバイル回線では25秒ごとのpingがモデムをアイドル状態に落とさない。
+  // モバイル回線では短い間隔のpingがモデムをアイドル状態に落とさない。
   // 画面を見ていないあいだ繋ぎっぱなしで放置されるのが電池切れの典型例だった。
   it("非表示のあいだはpingを止める", () => {
     const { ch, ws } = open();
@@ -118,7 +123,7 @@ describe("SignalChannel の keepalive", () => {
 // 経路が黙って死んでも readyState は OPEN のまま残る。応答を確かめないと、
 // クライアントは死んだソケットへ接続要求を投げ、来ない返事を待ち続ける。
 describe("SignalChannel の応答確認", () => {
-  it("pingに応答が無ければソケットを畳んで切断を知らせる", () => {
+  it("応答が連続して無ければソケットを畳んで切断を知らせる", () => {
     const onClose = vi.fn();
     const { ch, ws } = open({ onClose });
     goSilent(ws);
@@ -127,7 +132,7 @@ describe("SignalChannel の応答確認", () => {
     expect(ws.pings).toBe(1);
     expect(onClose).not.toHaveBeenCalled(); // まだ待っている
 
-    vi.advanceTimersByTime(PONG_TIMEOUT_MS);
+    vi.advanceTimersByTime(PONG_TIMEOUT_MS + PING_MS * (PONG_MISSES_BEFORE_DEAD - 1));
     expect(onClose).toHaveBeenCalledOnce();
     expect(ch.open).toBe(false);
     expect(ws.readyState).toBe(3);
@@ -152,7 +157,7 @@ describe("SignalChannel の応答確認", () => {
     expect(onClose).not.toHaveBeenCalled();
   });
 
-  // 眠っているあいだに切られているのが普通なので、次のping(25秒後)を待てない。
+  // 眠っているあいだに切られていることがあるので、次の定期pingを待たない。
   it("表示に戻った瞬間に生きているか確かめる", () => {
     const onClose = vi.fn();
     const { ch, ws } = open({ onClose });
@@ -162,7 +167,7 @@ describe("SignalChannel の応答確認", () => {
 
     ch.setActive(true);
     expect(ws.pings).toBe(1); // 復帰した時点で即座に問い合わせる
-    vi.advanceTimersByTime(PONG_TIMEOUT_MS);
+    vi.advanceTimersByTime(PONG_TIMEOUT_MS + PING_MS * (PONG_MISSES_BEFORE_DEAD - 1));
     expect(onClose).toHaveBeenCalledOnce();
   });
 
@@ -172,7 +177,7 @@ describe("SignalChannel の応答確認", () => {
     goSilent(ws);
     const browserClose = ws.onclose!; // 畳む前のハンドラを控える
 
-    vi.advanceTimersByTime(PING_MS + PONG_TIMEOUT_MS);
+    vi.advanceTimersByTime(PONG_TIMEOUT_MS + PING_MS * PONG_MISSES_BEFORE_DEAD);
     expect(onClose).toHaveBeenCalledOnce();
 
     browserClose({ code: 1006, reason: "" }); // 遅れて飛んでくるclose
