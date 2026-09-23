@@ -325,6 +325,40 @@ func TestTicket(t *testing.T) {
 		}
 	})
 
+	t.Run("延長すると期限が延び、鍵は変わらない", func(t *testing.T) {
+		m := NewManager(&config.Config{})
+		tk := m.IssueTicket()
+		m.mu.Lock()
+		m.ticketExp = time.Now().Add(time.Second)
+		m.mu.Unlock()
+		if !m.ExtendTicket() {
+			t.Fatal("有効なチケットを延長できなかった")
+		}
+		m.mu.Lock()
+		left := time.Until(m.ticketExp)
+		m.mu.Unlock()
+		if left < ticketTTL-time.Minute {
+			t.Fatalf("期限が延びていない (残り %v)", left)
+		}
+		if !m.VerifyTicketMAC(nonce, offerSDP, answerSDP, mac(m, tk, nonce, offerSDP, answerSDP)) {
+			t.Fatal("延長後に元のチケットが通らない")
+		}
+	})
+
+	t.Run("失効したチケットは延長で蘇らない", func(t *testing.T) {
+		m := NewManager(&config.Config{})
+		if m.ExtendTicket() {
+			t.Fatal("未発行なのに延長できた")
+		}
+		m.IssueTicket()
+		m.mu.Lock()
+		m.ticketExp = time.Now().Add(-time.Second)
+		m.mu.Unlock()
+		if m.ExtendTicket() || m.HasTicket() {
+			t.Fatal("期限切れのチケットが蘇った")
+		}
+	})
+
 	t.Run("未発行なら常に落ちる", func(t *testing.T) {
 		m := NewManager(&config.Config{})
 		if m.VerifyTicketMAC(nonce, offerSDP, answerSDP, "AAAA") {

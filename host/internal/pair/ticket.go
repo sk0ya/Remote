@@ -18,8 +18,8 @@ import (
 	"time"
 )
 
-// ticketTTL は生体認証を省ける時間。接続が続いているあいだは
-// DataChannelが開くたびに再発行されるので、実質この時間だけ切れていても復帰できる。
+// ticketTTL は生体認証を省ける時間。接続が続いているあいだは ExtendTicket で
+// 期限を延ばし続けるので、切れてからこの時間内なら生体認証なしで復帰できる。
 const ticketTTL = 10 * time.Minute
 
 // IssueTicket は新しい再接続チケットを発行し、古いものを失効させる。
@@ -29,6 +29,20 @@ func (m *Manager) IssueTicket() string {
 	m.ticket = Nonce()
 	m.ticketExp = time.Now().Add(ticketTTL)
 	return base64.RawURLEncoding.EncodeToString(m.ticket)
+}
+
+// ExtendTicket は有効なチケットの期限を今から ticketTTL 先へ延ばす。
+// 鍵は変えない。送り直しが要らないので、経路が切れる間際に延長しても
+// クライアントの持つチケットと食い違うことがない。
+// 既に失効していれば延ばさず false(失効後に蘇らせない)。
+func (m *Manager) ExtendTicket() bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if len(m.ticket) == 0 || time.Now().After(m.ticketExp) {
+		return false
+	}
+	m.ticketExp = time.Now().Add(ticketTTL)
+	return true
 }
 
 // HasTicket は有効なチケットを保持しているか。

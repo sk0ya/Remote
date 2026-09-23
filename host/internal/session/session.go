@@ -558,6 +558,11 @@ func (s *Session) SetActive(on bool) {
 	}
 }
 
+// Connected はP2P経路が今つながっているか。
+func (s *Session) Connected() bool {
+	return s.pc.ConnectionState() == webrtc.PeerConnectionStateConnected
+}
+
 // Send はJSONにしてDataChannel "input" でクライアントへ送る。
 func (s *Session) Send(v any) error {
 	b, err := json.Marshal(v)

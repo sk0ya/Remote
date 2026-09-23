@@ -147,6 +147,10 @@ const protocolVersion = 1
 // なお映像のキャプチャはP2P確立後にしか始まらないため、認証前に掴む資源はPeerConnectionだけ。
 const authTimeout = 120 * time.Second
 
+// ticketKeepInterval は接続中に再接続チケットの期限を延ばす間隔。
+// チケットの寿命(10分)より十分短ければよい。
+const ticketKeepInterval = time.Minute
+
 func main() {
 	cfg, err := config.Load()
 	if err != nil {
@@ -183,6 +187,7 @@ func main() {
 				ui.OpenBrowser(pairURL)
 			}
 			go a.runSignal()
+			go a.keepTicket()
 		})
 
 	// systray.Quit後にここへ戻る
@@ -347,6 +352,25 @@ func (a *app) runSignal() {
 		OnMessage:    a.onMessage,
 	})
 	a.client.Run(a.ctx)
+}
+
+// keepTicket は認証済みの接続が生きているあいだ、再接続チケットの期限を延ばし続ける。
+// 延ばさないと寿命は発行から数えるので、10分以上使ってから切れると
+// 必ず生体認証に落ちる。経路が死ねば Connected() が false になって延長が止まり、
+// そこから寿命のぶんだけチケットで復帰できる。
+func (a *app) keepTicket() {
+	t := time.NewTicker(ticketKeepInterval)
+	defer t.Stop()
+	for {
+		select {
+		case <-a.ctx.Done():
+			return
+		case <-t.C:
+			if s := a.session(); s != nil && s.Connected() {
+				a.pm.ExtendTicket()
+			}
+		}
+	}
 }
 
 func statusIdle(pm *pair.Manager) string {
