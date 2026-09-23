@@ -12,8 +12,8 @@ vi.mock("./signal", () => ({ SignalChannel: class {
 } }));
 vi.mock("./screen", () => ({ attachScreenLayout: () => ({ dispose() {} }) }));
 vi.mock("./config", () => ({ loadTicket: () => "ticket", loadCredId: () => null, clearTicket() {}, saveTicket() {}, saveCredId() {} }));
-const auth = vi.hoisted(() => ({ mac: vi.fn() }));
-vi.mock("./webauthn", () => ({ ticketMAC: auth.mac, b64uDecode: () => new Uint8Array(), assertPasskey: vi.fn() }));
+const auth = vi.hoisted(() => ({ mac: vi.fn(), passkey: vi.fn() }));
+vi.mock("./webauthn", () => ({ ticketMAC: auth.mac, b64uDecode: () => new Uint8Array(), assertPasskey: auth.passkey }));
 import { renderViewer } from "./viewer";
 
 class Peer {
@@ -38,6 +38,8 @@ beforeEach(() => {
   Peer.all = [];
   auth.mac.mockReset();
   auth.mac.mockResolvedValue("mac");
+  auth.passkey.mockReset();
+  auth.passkey.mockResolvedValue({ credId: "cred", clientData: "c", authData: "a", sig: "s" });
   vi.stubGlobal("window", { setTimeout, clearTimeout, addEventListener() {}, removeEventListener() {} });
   vi.stubGlobal("document", { getElementById: () => ({ classList: { toggle() {} } }), addEventListener() {}, removeEventListener() {} });
   vi.stubGlobal("RTCPeerConnection", Peer);
@@ -78,3 +80,29 @@ it("ignores an authentication failure belonging to a replaced peer", async () =>
   expect(Peer.all[1].connectionState).toBe("connecting");
 });
 
+it("falls back to the passkey on the same peer when the ticket has expired", async () => {
+  await offer();
+  const peer = Peer.all[0];
+  peer.connectionState = "connected";
+  peer.onconnectionstatechange!();
+  await flush();
+  expect(state.sent.filter(m => m.t === "auth")).toEqual([expect.objectContaining({ mac: "mac" })]);
+  state.events!.onMessage?.({ t: "error", reason: "auth", passkey: true }, "");
+  await flush();
+  expect(auth.passkey).toHaveBeenCalledTimes(1);
+  expect(state.sent.filter(m => m.t === "auth")).toHaveLength(2);
+  expect(state.sent.at(-1)).toMatchObject({ t: "auth", credId: "cred" });
+  expect(peer.connectionState).toBe("connected");
+  expect(state.sent.filter(m => m.t === "connect")).toHaveLength(1);
+});
+it("starts over from a connect request when the host did not keep the peer", async () => {
+  await offer();
+  Peer.all[0].connectionState = "connected";
+  Peer.all[0].onconnectionstatechange!();
+  await flush();
+  state.events!.onMessage?.({ t: "error", reason: "auth" }, "");
+  await vi.advanceTimersByTimeAsync(600);
+  expect(Peer.all[0].connectionState).toBe("closed");
+  expect(auth.passkey).not.toHaveBeenCalled();
+  expect(state.sent.filter(m => m.t === "connect")).toHaveLength(2);
+});

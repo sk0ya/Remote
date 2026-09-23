@@ -631,6 +631,7 @@ export function renderViewer(app: HTMLElement, hostId: string): void {
         nonce?: string;
         reason?: string;
         expected?: number;
+        passkey?: boolean;
         candidate?: RTCIceCandidateInit;
       };
       if (m.t === "candidate" && m.candidate) {
@@ -670,6 +671,15 @@ export function renderViewer(app: HTMLElement, hostId: string): void {
         if (m.reason === "protocol") {
           halt(`PC側とのバージョンが一致しません (必要: v${m.expected ?? "?"})。`);
         } else if (m.reason === "auth") {
+          if (ticket && m.passkey && authenticateCurrent) {
+            // チケットの失効。ホストはP2P経路を残して待っているので、
+            // 接続要求からやり直さず、この経路のままパスキーで認証し直す。
+            ticket = null;
+            clearTicket();
+            authenticating = false;
+            beginAuthentication();
+            return;
+          }
           endAttempt();
           resetPeer();
           if (ticket) {

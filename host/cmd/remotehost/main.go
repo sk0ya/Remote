@@ -113,6 +113,9 @@ type pendingAuth struct {
 	ufrag  string // answerのice-ufrag。この接続要求のICE候補かどうかの照合に使う。
 	gen    uint64 // 世代番号。タイムアウトが古い世代を巻き添えにしないための目印
 	timer  *time.Timer
+	// 再接続チケットを一度試して断られた。同じP2P経路のままパスキーで
+	// 認証し直せるのは一度だけで、2度目のチケットは通常の失敗として畳む。
+	ticketTried bool
 }
 
 // sdpICEUfrag はSDPから a=ice-ufrag の値を取り出す。見つからなければ空。
@@ -246,6 +249,22 @@ func (a *app) takeAuth() *pendingAuth {
 	}
 	a.pending = nil
 	return p
+}
+
+// retryAuth は takeAuth で取り出した仮セッションを、認証待ちに戻す。
+// チケットが失効していたとき、確立済みのP2P経路を捨てずにパスキーで
+// 認証し直してもらうために使う。取り出した後に別の要求で入れ替わって
+// いれば戻さず false を返す(pは呼び出し側が畳む)。
+func (a *app) retryAuth(p *pendingAuth) bool {
+	a.sessMu.Lock()
+	defer a.sessMu.Unlock()
+	if a.pending != nil {
+		return false
+	}
+	gen := p.gen
+	p.timer = time.AfterFunc(authTimeout, func() { a.expireAuth(gen) })
+	a.pending = p
+	return true
 }
 
 // recordAnswer は認証前のP2P疎通確認用answerを一度だけ記録する。
@@ -509,6 +528,19 @@ func (a *app) onMessage(msg json.RawMessage, peerIP string) {
 			var as pair.Assertion
 			if as, err = decodeAssertion(m); err == nil {
 				err = a.pm.VerifyAssertion(p.nonce, p.offer, p.answer, as)
+			}
+		}
+		if err != nil && m.MAC != "" && !p.ticketTried {
+			// チケットの失効(10分経過・ホスト再起動)はよくあること。P2P経路は
+			// 確認済みなので、ここで畳んで接続要求からやり直させるとICEをもう一周
+			// 待たせるだけになる。経路を残し、そのままパスキーを求める。
+			// (passkey を知らない古いクライアントは従来どおり接続要求から
+			// やり直し、その要求がこの仮セッションを畳む)
+			p.ticketTried = true
+			if a.retryAuth(p) {
+				log.Printf("session: 認証失敗: %v — パスキーでの再認証待ち", err)
+				a.client.Send(map[string]any{"t": "error", "reason": "auth", "passkey": true})
+				return
 			}
 		}
 		if err != nil {

@@ -194,3 +194,26 @@ func TestDetachPendingClearsOnlyItsOwn(t *testing.T) {
 		t.Fatal("新しい仮セッションを巻き添えにした")
 	}
 }
+
+func TestRetryAuthRestoresOnlyWhenNotReplaced(t *testing.T) {
+	p := &pendingAuth{gen: 1}
+	a := &app{pending: p, authGen: 1}
+	if a.takeAuth() != p || a.pending != nil {
+		t.Fatal("仮セッションを取り出せない")
+	}
+	if !a.retryAuth(p) || a.pending != p {
+		t.Fatal("チケット失効後に認証待ちへ戻せない")
+	}
+	p.timer.Stop()
+
+	// 取り出した後に新しい接続要求が入っていたら、そちらを優先する
+	a.takeAuth()
+	newer := &pendingAuth{gen: 2}
+	a.pending = newer
+	if a.retryAuth(p) {
+		t.Fatal("入れ替わった後なのに戻せたと報告した")
+	}
+	if a.pending != newer {
+		t.Fatal("新しい仮セッションを巻き添えにした")
+	}
+}
